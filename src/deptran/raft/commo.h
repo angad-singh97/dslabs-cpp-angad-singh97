@@ -8,20 +8,34 @@ namespace janus {
 
 class TxData;
 
+class RaftServer;
+class LogStruct;
 class RaftCommo : public Communicator {
+
 
  public:
   RaftCommo() = delete;
   RaftCommo(PollMgr*);
 
+
+
   void SendRequestVote(parid_t par_id,
-                       siteid_t site_id,
-                       uint64_t arg1,
-                       uint64_t arg2);
+                      siteid_t site_id,
+                      uint64_t candidateTerm,
+                      uint64_t candidateId,
+                      uint64_t lastLogIndex,
+                      uint64_t lastlogTerm,
+                      RaftServer* raftServer);
 
   void SendAppendEntries(parid_t par_id,
                          siteid_t site_id,
-                         shared_ptr<Marshallable> cmd);
+                         uint64_t term,
+                         uint64_t leaderId,
+                         uint64_t prevLogIndex,
+                         uint64_t prevLogTerm,
+                         vector<LogStruct> entries,
+                         uint64_t leaderCommit,
+                         RaftServer* raftServer);
 
   shared_ptr<IntEvent> 
   SendString(parid_t par_id, siteid_t site_id, const string& msg, string* res);

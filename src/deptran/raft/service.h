@@ -7,8 +7,8 @@
 #include "../command.h"
 #include "deptran/procedure.h"
 #include "../command_marshaler.h"
-#include "raft_rpc.h"
 #include "server.h"
+#include "raft_rpc.h"
 #include "macros.h"
 
 class SimpleCommand;
@@ -21,18 +21,28 @@ class RaftServiceImpl : public RaftService {
   RaftServer* svr_;
   RaftServiceImpl(TxLogServer* sched);
 
-  RpcHandler(RequestVote, 4,
-             const uint64_t&, arg1,
-             const uint64_t&, arg2,
-             uint64_t*, ret1,
+
+  RpcHandler(RequestVote, 6,
+             const uint64_t&, candidateTerm,
+             const uint64_t&, candidateId,
+             const uint64_t&, lastLogIndex,
+             const uint64_t&, lastLogTerm,
+             uint64_t*, currentTerm,
              bool_t*, vote_granted) {
-    *ret1 = 0;
+    *currentTerm = 0;
     *vote_granted = false;
   }
 
-  RpcHandler(AppendEntries, 2,
-             const MarshallDeputy&, cmd,
+  RpcHandler(AppendEntries, 8,
+             const uint64_t&, term,
+             const uint64_t&, leaderId,
+             const uint64_t&, prevLogIndex,
+             const uint64_t&, prevLogTerm,
+             const vector<LogStruct>&, entries,
+             const uint64_t&, leaderCommit,
+             uint64_t*, currentTerm,
              bool_t*, followerAppendOK) {
+    *currentTerm = 0;
     *followerAppendOK = false;
   }
 

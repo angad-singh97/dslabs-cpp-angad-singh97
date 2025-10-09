@@ -5,6 +5,7 @@
 #include "../command.h"
 #include "../procedure.h"
 #include "../command_marshaler.h"
+#include "server.h"
 #include "raft_rpc.h"
 #include "macros.h"
 
@@ -13,10 +14,16 @@ namespace janus {
 RaftCommo::RaftCommo(PollMgr* poll) : Communicator(poll) {
 }
 
+
+//sendRequestVote(candidateTerm, candidateId, lastLogIndex, lastLogTerm) -> term, voteGranted
+
 void RaftCommo::SendRequestVote(parid_t par_id,
                                 siteid_t site_id,
-                                uint64_t arg1,
-                                uint64_t arg2) {
+                                uint64_t candidateTerm,
+                                uint64_t candidateId,
+                                uint64_t lastLogIndex,
+                                uint64_t lastLogTerm,
+                                RaftServer* raftServer) {
   /*
    * Example code for sending a single RPC to server at site_id
    * You may modify and use this function or just use it as a reference
@@ -26,25 +33,33 @@ void RaftCommo::SendRequestVote(parid_t par_id,
     if (p.first == site_id) {
       RaftProxy *proxy = (RaftProxy*) p.second;
       FutureAttr fuattr;
-      fuattr.callback = [](Future* fu) {
+      fuattr.callback = [raftServer](Future* fu) {
         /* this is a handler that will be invoked when the RPC returns */
-        uint64_t ret1;
+        uint64_t returnedTerm;
         bool_t vote_granted;
         /* retrieve RPC return values in order */
-        fu->get_reply() >> ret1;
+        fu->get_reply() >> returnedTerm;
         fu->get_reply() >> vote_granted;
         /* process the RPC response here */
+        raftServer -> handleVoteResponse(vote_granted, returnedTerm);
+
       };
       /* Always use Call_Async(proxy, RPC name, RPC args..., fuattr)
       * to asynchronously invoke RPCs */
-      Call_Async(proxy, RequestVote, arg1, arg2, fuattr);
+      Call_Async(proxy, RequestVote, candidateTerm, candidateId, lastLogIndex, lastLogTerm, fuattr);
     }
   }
 }
 
 void RaftCommo::SendAppendEntries(parid_t par_id,
                                   siteid_t site_id,
-                                  shared_ptr<Marshallable> cmd) {
+                                  uint64_t term,
+                                  uint64_t leaderId,
+                                  uint64_t prevLogIndex,
+                                  uint64_t prevLogTerm,
+                                  vector<LogStruct> entries,
+                                  uint64_t leaderCommit,
+                                  RaftServer* raftServer) {
   /*
    * More example code for sending a single RPC to server at site_id
    * You may modify and use this function or just use it as a reference
@@ -54,13 +69,16 @@ void RaftCommo::SendAppendEntries(parid_t par_id,
     if (p.first == site_id) {
       RaftProxy *proxy = (RaftProxy*) p.second;
       FutureAttr fuattr;
-      fuattr.callback = [](Future* fu) {
+      fuattr.callback = [raftServer, site_id](Future* fu) {
+        uint64_t currentTerm;
         bool_t followerAppendOK;
+        fu->get_reply() >> currentTerm;
         fu->get_reply() >> followerAppendOK;
+        raftServer -> handleAppendResponse(followerAppendOK, currentTerm, site_id);
+
       };
       /* wrap Marshallable in a MarshallDeputy to send over RPC */
-      MarshallDeputy md(cmd);
-      Call_Async(proxy, AppendEntries, md, fuattr);
+      Call_Async(proxy, AppendEntries, term, leaderId, prevLogIndex, prevLogTerm, entries, leaderCommit, fuattr);
     }
   }
 }
