@@ -33,19 +33,22 @@ void RaftCommo::SendRequestVote(parid_t par_id,
     if (p.first == site_id) {
       RaftProxy *proxy = (RaftProxy*) p.second;
       FutureAttr fuattr;
-      fuattr.callback = [raftServer](Future* fu) {
+      fuattr.callback = [raftServer, site_id](Future* fu) {
         /* this is a handler that will be invoked when the RPC returns */
         uint64_t returnedTerm;
         bool_t vote_granted;
         /* retrieve RPC return values in order */
         fu->get_reply() >> returnedTerm;
         fu->get_reply() >> vote_granted;
+        Log_info("SendRequestVote: Received response from server %d, returnedTerm=%lu, voteGranted=%d", site_id, returnedTerm, vote_granted);
         /* process the RPC response here */
         raftServer -> handleVoteResponse(vote_granted, returnedTerm);
 
       };
       /* Always use Call_Async(proxy, RPC name, RPC args..., fuattr)
       * to asynchronously invoke RPCs */
+      Log_info("[COMMO] SendRequestVote: Sending RequestVote to server %d with term=%lu, candidateId=%lu, lastLogIndex=%lu, lastLogTerm=%lu",
+               site_id, candidateTerm, candidateId, lastLogIndex, lastLogTerm);
       Call_Async(proxy, RequestVote, candidateTerm, candidateId, lastLogIndex, lastLogTerm, fuattr);
     }
   }

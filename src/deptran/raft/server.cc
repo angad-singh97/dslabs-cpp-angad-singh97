@@ -6,6 +6,7 @@
 #include "frame.h"
 #include "coordinator.h"
 #include "../classic/tpc_command.h"
+#include <ctime>
 
 
 namespace janus {
@@ -15,8 +16,9 @@ RaftServer::RaftServer(Frame * frame) {
   /* Your code here for server initialization. Note that this function is 
      called in a different OS thread. Be careful about thread safety if 
      you want to initialize variables here. */
-     lastHeartbeatTime = std::chrono::steady_clock::now();
-     resetElectionTimeout();
+  
+  // Don't initialize timing here - loc_id_ is not set yet
+  // Move initialization to Setup() where loc_id_ is properly set
 
 }
 
@@ -30,13 +32,24 @@ void RaftServer::Setup() {
      framework, this function could be called after a RPC handler is triggered. 
      Your code should be aware of that. This function is always called in the 
      same OS thread as the RPC handlers. */
+  
+  // Initialize election timeout here where loc_id_ is properly set
+  lastHeartbeatTime = std::chrono::steady_clock::now() - std::chrono::milliseconds(loc_id_ * 100);
+  resetElectionTimeout();
+  
   // SyncRpcExample();
   Coroutine::CreateRun([this]() {
     while (true) {
       auto now = std::chrono::steady_clock::now();
 
-      if (serverState == RaftServer::FOLLOWER && now >= lastHeartbeatTime + electionTimeout) {
-        Log_info("Starting election - timeout expired");
+      if ((serverState == RaftServer::FOLLOWER || serverState == RaftServer::CANDIDATE) && now >= lastHeartbeatTime + electionTimeout) {
+        if (serverState == RaftServer::FOLLOWER) {
+          Log_info("Starting election as FOLLOWER - timeout expired - SERVER %d", loc_id_);
+        } else if (serverState == RaftServer::CANDIDATE) {
+          Log_info("Restarting election as CANDIDATE - timeout expired - SERVER %d", loc_id_);
+        } else {
+          Log_info("Election timer triggered in unexpected state %d - SERVER %d", serverState, loc_id_);
+        }
         startElection();
         resetElectionTimeout();
       }
@@ -47,7 +60,7 @@ void RaftServer::Setup() {
   });
 
 
-  Coroutine::CreateRun([this]() {
+  /*Coroutine::CreateRun([this]() {
     while (true) {
       if (serverState == RaftServer::LEADER) {
         Log_info("Leader sending heartbeats");
@@ -65,12 +78,13 @@ void RaftServer::Setup() {
       Coroutine::Sleep(100);
     }
 
-  });
+  });*/
 
   Coroutine::CreateRun([this]() {
     while (true) {
       while (lastApplied < commitIndex) {
         lastApplied++;
+        // app_next_(*logs[lastApplied-1].command);
         Log_info("Applied entry %d: term=%d", lastApplied, logs[lastApplied-1].term);
       }
       Coroutine::Sleep(50); 
@@ -79,26 +93,42 @@ void RaftServer::Setup() {
 }
 
 void RaftServer::handleVoteResponse (bool voteGranted, uint64_t returnedTerm) {
-  if (returnedTerm != currentElectionTerm || !electionInProgress) {
-    return; //in this case it is safe to ignore it as it is probably stale
+
+
+
+  //Universal-term check, the paper says we do this for ANY request/response RPC received
+  if (returnedTerm >  currentTerm) {
+    convertToFollower(returnedTerm);
+    Log_info("Converted to follower due to higher term in vote response. returnedTerm=%lu, currentTerm=%d", returnedTerm, currentTerm);
+    return;
+  }
+
+  if (serverState != CANDIDATE){
+    Log_info("Received vote response: voteGranted=%d, returnedTerm=%lu, serverState=%d, currentTerm=%d. Not a candidate anymore (state=%d), returning from handleVoteResponse.", 
+             voteGranted, returnedTerm, serverState, currentTerm, serverState);
+    return;
+  }
+
+  if (returnedTerm < currentTerm) {
+    Log_info("handleVoteResponse: Received vote response with older term (returnedTerm=%lu < currentTerm=%d), no action taken. voteGranted=%d, serverState=%d, votesReceived=%d",
+             returnedTerm, currentTerm, voteGranted, serverState, votesReceived);
+    return;
   }
 
   if (voteGranted) {
     votesReceived++;
-
-    if (votesReceived > SERVER_COUNT/2) {
-      //the election has been won, yay!
+    Log_info("Received voteGranted=true. votesReceived=%d, currentTerm=%d, serverState=%d", votesReceived, currentTerm, serverState);
+    int majority = (SERVER_COUNT/2) + 1;
+    if (votesReceived >= majority) {
       serverState = RaftServer::LEADER;
       electionInProgress = false;
+      Log_info("Server %d became Leader for term %lu", loc_id_, currentTerm);
 
-      for (int i = 0 ; i < SERVER_COUNT ; i++) {
-        if (i != loc_id_) {
-          nextIndex[i] = logs.size() + 1;
-          matchIndex[i] = 0;
-        }
+      int nextLogIndex = logs.size() + 1;
+      for (int i = 0; i < SERVER_COUNT ; i++){
+        nextIndex[i] = nextLogIndex;
+        matchIndex[i] = 0;
       }
-
-      
 
       for (int i = 0 ; i < SERVER_COUNT ; i++) {
         if (i != loc_id_) {
@@ -107,8 +137,9 @@ void RaftServer::handleVoteResponse (bool voteGranted, uint64_t returnedTerm) {
             logs.empty() ? 0 : logs.back().term, emptyEntries, commitIndex, this);
         }
       }
-    }
 
+      return;
+    }
   }
 }
 
@@ -149,18 +180,51 @@ void RaftServer::handleAppendResponse(bool success, uint64_t returnedTerm, int f
   }
 }
 
-void RaftServer::startElection() {
-  
-  currentTerm++;
-  votedFor = loc_id_;
+void RaftServer::convertToFollower(uint64_t newTerm) {
+  ServerState priorState = serverState;
+
+  //here we perform actions common to all prior server states
+  currentTerm = newTerm;
+  serverState = RaftServer::FOLLOWER;
+  votedFor = -1;
 
 
-  currentElectionTerm = currentTerm;
-  votesReceived = 1;//I will always vote for myself
-  electionInProgress = true;
+  if (priorState == RaftServer::LEADER) {
+    Log_info("Server %d (Leader) stepping down for new term %lu", loc_id_, newTerm);
+  } else if (priorState == RaftServer::CANDIDATE) {
+    //clean up whatever was being used for the prior ongoing election we were running
+    electionInProgress = false;
+    votesReceived = 0;
+    Log_info("Server %d (Candidate) aborting election for new term %lu", loc_id_, newTerm);
+  }
+
 
   resetElectionTimeout();
+  lastHeartbeatTime = std::chrono::steady_clock::now();
+}
+
+void RaftServer::startElection() {
+
+  //become a candidate
+  serverState = RaftServer::CANDIDATE;
   
+  //increment currentTerm
+  currentTerm++;
+
+
+  //vote for self
+  votedFor = loc_id_;
+  votesReceived = 1;//I will always vote for myself
+
+  //this is for our state management
+  electionInProgress = true;
+
+  //reset election timer
+  resetElectionTimeout();
+  lastHeartbeatTime = std::chrono::steady_clock::now();
+
+  
+  //Send RequestVote RPCs to all other servers
   for (int i = 0 ; i < SERVER_COUNT ; i++) {
     if (i != loc_id_) {
       //now the handler will be inside this? but the handler is PER request, so how do we aggregate
@@ -174,17 +238,21 @@ void RaftServer::startElection() {
       int lastLogIndex = logs.size(); //this makes it 0 for EMPTY case, actual size otherwise
       int lastLogTerm = logs.empty() ? 0 : logs.back().term;
       
+      Log_info("[SERVER] I am server %d and I am sending a REQUEST VOTE RPC with CurrentTerm=%lu, CandidateId=%d, LastLogIndex=%d, LastLogTerm=%d to server %d", 
+                loc_id_, currentTerm, loc_id_, lastLogIndex, lastLogTerm, i);
       commo()->SendRequestVote(0, i, currentTerm, loc_id_, lastLogIndex, lastLogTerm, this);
     }
   }
   
-  serverState = RaftServer::CANDIDATE;
+
 
 }
 
 void RaftServer::resetElectionTimeout(){
-  int randomDuration = 150 +(rand()%150);
+  // Use a much wider range and server ID bias for better separation
+  int randomDuration = 200 + (rand() % 201);          // 200 to 400 ms randomly here
   electionTimeout = std::chrono::milliseconds(randomDuration);
+  Log_info("Server %d: election timeout set to %ld ms", loc_id_, randomDuration);
 }
 
 
@@ -217,8 +285,10 @@ bool RaftServer::Start(shared_ptr<Marshallable> &cmd,
 
 void RaftServer::GetState(bool *is_leader, uint64_t *term) {
   /* Your code here. This function can be called from another OS thread. */
-  *is_leader = 0;
-  *term = 0;
+  Log_info("DEBUG: Server %d reports term=%ld, is_leader=%d", loc_id_, currentTerm, *is_leader);
+  *is_leader = (serverState == RaftServer::LEADER);
+  *term = currentTerm;
+
 }
 
 void RaftServer::SyncRpcExample() {

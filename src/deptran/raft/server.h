@@ -72,8 +72,6 @@ class RaftServer : public TxLogServer {
 
   //tracking the election stuff here
   int votesReceived = 0;
-  int currentElectionTerm = 0;
-  bool electionInProgress = false;
 
 
   /* Your functions here */
@@ -81,11 +79,8 @@ class RaftServer : public TxLogServer {
   void resetElectionTimeout();
   void startElection();
   void handleVoteResponse(bool voteGranted, uint64_t returnedTerm);
-
   void handleAppendResponse(bool success, uint64_t returnedTerm, int followerId);
-
-
-
+  void convertToFollower(uint64_t newTerm);
 
   /* do not modify this class below here */
 

@@ -24,60 +24,35 @@ void RaftServiceImpl::HandleRequestVote(const uint64_t& candidateTerm,
                                         {
   /* Your code here */
 
-  //IF THE VOTE HAS COME IN FROM SOMEONE WITH A GREATER TERM
-      //UPDATE YOUR CURRENT TERM
-      //REVERT TO FOLLOWER
- if (candidateTerm > svr_->currentTerm) {
-   svr_ -> currentTerm = candidateTerm;
-   svr_ -> votedFor = -1;
-   svr_ -> serverState = RaftServer::FOLLOWER;
-   //ack the new leader candidate, give them some time to win.. 
-   // we can always try again later, right?
-   svr_ -> resetElectionTimeout(); 
- }
+  //Universal-term check, the paper says we do this for ANY request/response RPC received
+  if (candidateTerm > svr_ -> currentTerm) {
+    svr_ -> convertToFollower(candidateTerm);
+  }
 
- //MAIN DECISION LOGIC HERE
+  //CHECK 1 - is this a stale request?
+  bool isStaleRequest = candidateTerm < svr_ -> currentTerm;
+  //CHECK 2 - Have I already voted for someone?
+  bool alreadyVotedForDifferentServer = svr_ -> votedFor != -1 && svr_ -> votedFor != candidateId;
+  //CHECK 3 - Are the candidate's logs at least AS up-to-date as mine?
+  uint64_t myLastLogTerm = svr_ -> logs.empty() ? 0 : svr_ -> logs.back().term;
+  uint64_t myLastLogIndex = svr_ -> logs.size();
+  bool areLogsStale = (lastLogTerm < myLastLogTerm) || (lastLogTerm == myLastLogTerm && lastLogIndex < myLastLogIndex);
 
- //REPLY FALSE IF CANDIDATE TERM < CURRENT TERM
- if (candidateTerm < svr_ -> currentTerm) {
+  if (isStaleRequest || alreadyVotedForDifferentServer || areLogsStale) {
+    *vote_granted = false;
+    *currentTerm = svr_ -> currentTerm;
+    defer->reply();
+    return;
+  } 
+
+  //grant the vote!
+  svr_ -> votedFor = candidateId;
+  svr_ -> lastHeartbeatTime = std::chrono::steady_clock::now();
+  // svr_ -> resetElectionTimeout(); - we will only do this when starting elections mainly
+  *vote_granted = true;
   *currentTerm = svr_ -> currentTerm;
-  *vote_granted = false;
   defer->reply();
   return;
- }
-
- //GRANT THE VOTE, IF 
-    //VOTED FOR IS NULL (-1) OR EQUALS CANDIDATE_ID 
-    bool votedForCondition = svr_ -> votedFor  == -1 || svr_ -> votedFor == candidateId;
-    
-    // /(does this mean we already voted for them? why are we not checking things like term? does this get checked by the log check?)
-    //AND
-    //CANDIDATE'S LOG IS AT LEAST AS UP-TO-DATE AS OURS
-    bool logCheckCondition;
-    vector<LogStruct> localLogs = svr_ -> logs;
-    int localLogLastIndex = localLogs.empty() ? 0 : localLogs.size();
-    int localLogLastTerm = localLogs.empty()? 0 : localLogs.back().term;
-
-    if (lastLogTerm > localLogLastTerm || (lastLogTerm == localLogLastTerm && lastLogIndex >= localLogLastIndex)) {
-      logCheckCondition = true;
-    } else {
-      logCheckCondition = false;
-    }
-
-
-
-    //decide basis both conditions now
-    if (votedForCondition && logCheckCondition) {
-      svr_ -> votedFor = candidateId;
-      *currentTerm = svr_ -> currentTerm;
-      *vote_granted = true;
-    } else {
-      *currentTerm = svr_ -> currentTerm;
-      *vote_granted = false;
-    }
-
-
-    defer->reply();
 }
 
 void RaftServiceImpl::HandleAppendEntries(const uint64_t& term,
@@ -115,7 +90,6 @@ void RaftServiceImpl::HandleAppendEntries(const uint64_t& term,
 
     svr_ -> electionInProgress = false;
     svr_ -> votesReceived = 0;
-    svr_ -> currentElectionTerm = 0;
   }
 
   //this is a heartbeat, so reset the timer
