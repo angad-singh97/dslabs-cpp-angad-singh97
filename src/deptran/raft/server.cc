@@ -34,7 +34,7 @@ void RaftServer::Setup() {
      same OS thread as the RPC handlers. */
   
   // Initialize election timeout here where loc_id_ is properly set
-  lastHeartbeatTime = std::chrono::steady_clock::now() - std::chrono::milliseconds(loc_id_ * 100);
+  lastHeartbeatTime = std::chrono::steady_clock::now() + std::chrono::milliseconds(1000 + (loc_id_ * 200));
   resetElectionTimeout();
   
   // SyncRpcExample();
@@ -43,17 +43,36 @@ void RaftServer::Setup() {
       auto now = std::chrono::steady_clock::now();
 
       if ((serverState == RaftServer::FOLLOWER || serverState == RaftServer::CANDIDATE) && now >= lastHeartbeatTime + electionTimeout) {
-        if (serverState == RaftServer::FOLLOWER) {
-          Log_info("Starting election as FOLLOWER - timeout expired - SERVER %d", loc_id_);
-        } else if (serverState == RaftServer::CANDIDATE) {
-          Log_info("Restarting election as CANDIDATE - timeout expired - SERVER %d", loc_id_);
-        } else {
-          Log_info("Election timer triggered in unexpected state %d - SERVER %d", serverState, loc_id_);
-        }
+        Log_info("Starting election as %s - timeout expired - SERVER %d", 
+          (serverState == RaftServer::FOLLOWER) ? "FOLLOWER" : "CANDIDATE", loc_id_);
         startElection();
         resetElectionTimeout();
       }
 
+      Coroutine::Sleep(100);
+    }
+
+  });
+
+  Coroutine::CreateRun([this]() {
+    while (true) {
+      if (serverState == RaftServer::LEADER) {
+        for (int i = 0 ; i < SERVER_COUNT ; i++) {
+          if (i == loc_id_) continue;
+
+          int currNextIndex = nextIndex[i];
+          int prevIdx = currNextIndex - 1;
+          uint64_t prevTerm = prevIdx > 0? logs[prevIdx - 1].term : 0;
+
+          vector<LogStruct> entries;
+
+          if (currNextIndex >= 1 && currNextIndex <= (int)logs.size()) {
+            entries.insert(entries.end(), logs.begin() + (currNextIndex - 1), logs.end());
+          }
+
+          commo() -> SendAppendEntries(0, i, currentTerm, loc_id_, prevIdx, prevTerm, entries, commitIndex, this);
+        } 
+      }
       Coroutine::Sleep(100);
     }
 
@@ -82,12 +101,15 @@ void RaftServer::Setup() {
 
   Coroutine::CreateRun([this]() {
     while (true) {
-      while (lastApplied < commitIndex) {
-        lastApplied++;
-        // app_next_(*logs[lastApplied-1].command);
-        Log_info("Applied entry %d: term=%d", lastApplied, logs[lastApplied-1].term);
-      }
-      Coroutine::Sleep(50); 
+      // while (lastApplied < commitIndex && lastApplied < (int)logs.size()) {
+      //   lastApplied++;
+      //   // app_next_ callback not implemented yet
+      //   // if (app_next_) {
+      //   //   app_next_(*logs[lastApplied-1].command);
+      //   // }
+      //   Log_info("Applied entry %d: term=%d", lastApplied, logs[lastApplied-1].term);
+      // }
+      // Coroutine::Sleep(50); 
     }
   });
 }
@@ -104,8 +126,8 @@ void RaftServer::handleVoteResponse (bool voteGranted, uint64_t returnedTerm) {
   }
 
   if (serverState != CANDIDATE){
-    Log_info("Received vote response: voteGranted=%d, returnedTerm=%lu, serverState=%d, currentTerm=%d. Not a candidate anymore (state=%d), returning from handleVoteResponse.", 
-             voteGranted, returnedTerm, serverState, currentTerm, serverState);
+    Log_info("Ignoring late vote response: server %d is now %s (was candidate)", 
+             loc_id_, (serverState == LEADER) ? "LEADER" : "FOLLOWER");
     return;
   }
 
@@ -120,22 +142,14 @@ void RaftServer::handleVoteResponse (bool voteGranted, uint64_t returnedTerm) {
     Log_info("Received voteGranted=true. votesReceived=%d, currentTerm=%d, serverState=%d", votesReceived, currentTerm, serverState);
     int majority = (SERVER_COUNT/2) + 1;
     if (votesReceived >= majority) {
+      Log_info("LEADER TRANSITION: Server %d is now LEADER for term %lu", loc_id_, currentTerm);
       serverState = RaftServer::LEADER;
-      electionInProgress = false;
-      Log_info("Server %d became Leader for term %lu", loc_id_, currentTerm);
+      votesReceived = 0; // Reset vote counter after becoming leader
 
       int nextLogIndex = logs.size() + 1;
       for (int i = 0; i < SERVER_COUNT ; i++){
         nextIndex[i] = nextLogIndex;
         matchIndex[i] = 0;
-      }
-
-      for (int i = 0 ; i < SERVER_COUNT ; i++) {
-        if (i != loc_id_) {
-          vector<LogStruct> emptyEntries;
-          commo() -> SendAppendEntries(0, i, currentTerm, loc_id_, logs.size(), 
-            logs.empty() ? 0 : logs.back().term, emptyEntries, commitIndex, this);
-        }
       }
 
       return;
@@ -175,7 +189,7 @@ void RaftServer::handleAppendResponse(bool success, uint64_t returnedTerm, int f
       int prevIndex = nextIndex[followerId] - 1;
       int prevTerm = (prevIndex > 0) ? logs[prevIndex - 1].term : 0;
       vector<LogStruct> retryEntry = {logs[prevIndex]};
-      commo() -> SendAppendEntries(0, followerId, currentTerm, loc_id_, prevIndex - 1, prevTerm, retryEntry, commitIndex, this);
+      commo() -> SendAppendEntries(0, followerId, currentTerm, loc_id_, prevIndex, prevTerm, retryEntry, commitIndex, this);
     }
   }
 }
@@ -193,7 +207,6 @@ void RaftServer::convertToFollower(uint64_t newTerm) {
     Log_info("Server %d (Leader) stepping down for new term %lu", loc_id_, newTerm);
   } else if (priorState == RaftServer::CANDIDATE) {
     //clean up whatever was being used for the prior ongoing election we were running
-    electionInProgress = false;
     votesReceived = 0;
     Log_info("Server %d (Candidate) aborting election for new term %lu", loc_id_, newTerm);
   }
@@ -217,7 +230,7 @@ void RaftServer::startElection() {
   votesReceived = 1;//I will always vote for myself
 
   //this is for our state management
-  electionInProgress = true;
+
 
   //reset election timer
   resetElectionTimeout();
@@ -238,8 +251,8 @@ void RaftServer::startElection() {
       int lastLogIndex = logs.size(); //this makes it 0 for EMPTY case, actual size otherwise
       int lastLogTerm = logs.empty() ? 0 : logs.back().term;
       
-      Log_info("[SERVER] I am server %d and I am sending a REQUEST VOTE RPC with CurrentTerm=%lu, CandidateId=%d, LastLogIndex=%d, LastLogTerm=%d to server %d", 
-                loc_id_, currentTerm, loc_id_, lastLogIndex, lastLogTerm, i);
+      Log_info("Server %d sending RequestVote to server %d: term=%lu, lastLogIndex=%d, lastLogTerm=%d", 
+                loc_id_, i, currentTerm, lastLogIndex, lastLogTerm);
       commo()->SendRequestVote(0, i, currentTerm, loc_id_, lastLogIndex, lastLogTerm, this);
     }
   }
@@ -252,7 +265,6 @@ void RaftServer::resetElectionTimeout(){
   // Use a much wider range and server ID bias for better separation
   int randomDuration = 200 + (rand() % 201);          // 200 to 400 ms randomly here
   electionTimeout = std::chrono::milliseconds(randomDuration);
-  Log_info("Server %d: election timeout set to %ld ms", loc_id_, randomDuration);
 }
 
 
@@ -270,13 +282,13 @@ bool RaftServer::Start(shared_ptr<Marshallable> &cmd,
   newEntry.command = cmd;
   logs.push_back(newEntry);
 
-  for (int i = 0; i < SERVER_COUNT ; i++ ){
+  /*for (int i = 0; i < SERVER_COUNT ; i++ ){
     if (i != loc_id_) {
       vector<LogStruct> newEntries = {newEntry};
       commo() -> SendAppendEntries(0, i, currentTerm, loc_id_,
         logs.size() - 1, logs.size() > 1 ? logs[logs.size() - 2].term : 0, newEntries, commitIndex, this);
     }
-  }
+  }*/
 
   *index = logs.size();
   *term = currentTerm;

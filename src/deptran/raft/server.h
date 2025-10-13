@@ -49,7 +49,7 @@ class RaftServer : public TxLogServer {
   //persistent state variables
   int currentTerm = 0;
   int votedFor = -1;
-  int SERVER_COUNT = 5;
+  static const int SERVER_COUNT = 5;
 
   //volatile state variables
   int commitIndex = 0;
@@ -61,8 +61,8 @@ class RaftServer : public TxLogServer {
   //right now there is no difference in my implementation between them
 
   //volatile state variables - only for leaders to use for sending data
-  unordered_map<int, int> nextIndex;
-  unordered_map<int, int> matchIndex;
+  int nextIndex[SERVER_COUNT];
+  int matchIndex[SERVER_COUNT];
 
   vector<LogStruct> logs;
 

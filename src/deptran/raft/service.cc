@@ -24,6 +24,9 @@ void RaftServiceImpl::HandleRequestVote(const uint64_t& candidateTerm,
                                         {
   /* Your code here */
 
+  Log_info("HandleRequestVote called on server %d: candidateId=%lu, candidateTerm=%lu, lastLogIndex=%lu, lastLogTerm=%lu, myTerm=%d, votedFor=%d", 
+           svr_->loc_id_, candidateId, candidateTerm, lastLogIndex, lastLogTerm, svr_->currentTerm, svr_->votedFor);
+
   //Universal-term check, the paper says we do this for ANY request/response RPC received
   if (candidateTerm > svr_ -> currentTerm) {
     svr_ -> convertToFollower(candidateTerm);
@@ -65,6 +68,17 @@ void RaftServiceImpl::HandleAppendEntries(const uint64_t& term,
                                           bool_t* followerAppendOK,
                                           rrr::DeferredReply* defer) {
   /* Your code here */
+
+  // Log_info("RECEIVED AE: Server %d got AE from leader %d, term=%lu, prevIdx=%lu", 
+  //   svr_->loc_id_, leaderId, term, prevLogIndex);
+    
+  //Universal-term check, the paper says we do this for ANY request/response RPC received
+  if (term > svr_ -> currentTerm) {
+    svr_ -> convertToFollower(term);
+  }
+                                    
+
+  //reject it if the term is lower
   if (term < svr_ -> currentTerm) {
     *currentTerm = svr_ -> currentTerm;
     *followerAppendOK = false;
@@ -72,6 +86,11 @@ void RaftServiceImpl::HandleAppendEntries(const uint64_t& term,
     return;
   }
 
+  //update heartbeat timestamp on any valid AE.. 
+  svr_->lastHeartbeatTime = std::chrono::steady_clock::now();
+  
+  //here if the prevLogIndex is either bigger than what we have in the logs
+  //or if we have a different term at that index, we return false, let the leader drop a count and come back to us..
   if (prevLogIndex > 0) {
     if (prevLogIndex > svr_ -> logs.size() || 
     svr_ -> logs[prevLogIndex - 1].term != prevLogTerm) {
@@ -81,44 +100,33 @@ void RaftServiceImpl::HandleAppendEntries(const uint64_t& term,
       return;
     }
   }
-
-  //if I received one of these from someone with a higher term, I should become a follower
-  if (term > svr_->currentTerm) {
-    svr_->currentTerm = term;
-    svr_->serverState = RaftServer::FOLLOWER;
-    svr_->votedFor = -1;
-
-    svr_ -> electionInProgress = false;
-    svr_ -> votesReceived = 0;
-  }
-
-  //this is a heartbeat, so reset the timer
-  svr_->resetElectionTimeout();
-  svr_->lastHeartbeatTime = std::chrono::steady_clock::now();
-
-  svr_->serverState = RaftServer::FOLLOWER;
-
-  int conflictingIndex = prevLogIndex;
-
-  for (int i = 0; i < entries.size(); i++) {
-    conflictingIndex++;
-    if (conflictingIndex <= svr_ -> logs.size()) {
-      if (svr_->logs[conflictingIndex - 1].term != entries[i].term) {
-        svr_->logs.erase(svr_->logs.begin() + conflictingIndex - 1, svr_->logs.end());
-        // append all remaining entries starting at i
-        for (int j = i; j < entries.size(); j++) svr_->logs.push_back(entries[j]);
-        goto done_append;
-      }
-    } else {
-      // log is shorter; append remaining from i
-      for (int j = i; j < entries.size(); j++) svr_->logs.push_back(entries[j]);
-      goto done_append;
+  
+  
+    //okay past this point the term is equal to what I have, 
+    // or at least I have updated myself to be a follower in this term
+    //POINT BEING - we now trust the leader, we take its logs and update ourselves accordinly, no questions asked!!
+    if (svr_->serverState == RaftServer::CANDIDATE) {
+      svr_->serverState = RaftServer::FOLLOWER;
     }
+
+
+   uint64_t firstNewEntryIndex = prevLogIndex + 1;
+
+   int64_t conflictIndex  = -1;
+   for (uint64_t i = 0 ; i < entries.size() ; i ++ ) {
+    uint64_t log_index = firstNewEntryIndex + i;
+    if (log_index > svr_->logs.size() || svr_->logs[log_index - 1].term != entries[i].term) {
+      conflictIndex = static_cast<int64_t> (log_index);
+      break;
+    }
+   }
+
+  if (conflictIndex != -1) {
+    svr_ -> logs.resize(static_cast<size_t>(conflictIndex - 1));
+
+    size_t offset =static_cast<size_t>(conflictIndex - firstNewEntryIndex);
+    svr_ -> logs.insert(svr_->logs.end(), entries.begin() +offset, entries.end());
   }
-  
-  // if we got here, either no entries or all matched existing; nothing to append
-  
-  done_append: ;
 
   if (leaderCommit > svr_->commitIndex) {
     uint64_t lastNewEntryIndex = svr_->logs.size();
