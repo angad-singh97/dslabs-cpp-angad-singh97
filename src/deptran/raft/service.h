@@ -33,11 +33,12 @@ class RaftServiceImpl : public RaftService {
     *vote_granted = false;
   }
 
-  RpcHandler(AppendEntries, 7,
+  RpcHandler(AppendEntries, 8,
              const uint64_t&, term,
              const uint64_t&, leaderId,
              const uint64_t&, prevLogIndex,
              const uint64_t&, prevLogTerm,
+             const std::vector<MarshallDeputy>&, entries,
              const uint64_t&, leaderCommit,
              uint64_t*, currentTerm,
              bool_t*, followerAppendOK) {

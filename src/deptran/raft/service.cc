@@ -24,8 +24,8 @@ void RaftServiceImpl::HandleRequestVote(const uint64_t& candidateTerm,
                                         {
   /* Your code here */
 
-  Log_info("HandleRequestVote called on server %d: candidateId=%lu, candidateTerm=%lu, lastLogIndex=%lu, lastLogTerm=%lu, myTerm=%d, votedFor=%d", 
-    svr_->loc_id_, candidateId, candidateTerm, lastLogIndex, lastLogTerm, svr_->currentTerm.load(), svr_->votedFor.load());
+  // Log_info("HandleRequestVote called on server %d: candidateId=%lu, candidateTerm=%lu, lastLogIndex=%lu, lastLogTerm=%lu, myTerm=%d, votedFor=%d", 
+    // svr_->loc_id_, candidateId, candidateTerm, lastLogIndex, lastLogTerm, svr_->currentTerm.load(), svr_->votedFor.load());
 
   //Universal-term check, the paper says we do this for ANY request/response RPC received
   if (candidateTerm > svr_ -> currentTerm.load()) {
@@ -39,7 +39,7 @@ void RaftServiceImpl::HandleRequestVote(const uint64_t& candidateTerm,
   uint64_t myLastLogTerm, myLastLogIndex;
   {
       std::lock_guard<std::mutex> lock(svr_->logs_mutex);
-      myLastLogTerm = svr_ -> logs.empty() ? 0 : svr_ -> logs.back().term;
+      myLastLogTerm = svr_ -> logs.empty() ? 0 : svr_ -> logs.back().first;
       myLastLogIndex = svr_ -> logs.size();
   }
   bool areLogsStale = (lastLogTerm < myLastLogTerm) || (lastLogTerm == myLastLogTerm && lastLogIndex < myLastLogIndex);
@@ -107,7 +107,7 @@ void RaftServiceImpl::HandleAppendEntries(const uint64_t& term,
     {
       std::lock_guard<std::mutex> lock(svr_->logs_mutex);
       if (prevLogIndex > svr_ -> logs.size() || 
-          svr_ -> logs[prevLogIndex - 1].term != prevLogTerm) {
+          svr_ -> logs[prevLogIndex - 1].first != prevLogTerm) {
           *currentTerm = svr_->currentTerm.load();
           *followerAppendOK = false;
           defer->reply();
@@ -133,9 +133,9 @@ void RaftServiceImpl::HandleAppendEntries(const uint64_t& term,
    uint64_t firstNewEntryIndex = prevLogIndex + 1;
 
    int64_t conflictIndex  = -1;
-   for (uint64_t i = 0 ; i < entries.size() ; i ++ ) {
+   for (uint64_t i = 0 ; i < marshallDeputyVec.size() ; i ++ ) {
     uint64_t log_index = firstNewEntryIndex + i;
-    if (log_index > svr_->logs.size() || svr_->logs[log_index - 1].term != entries[i].term) {
+    if (log_index > svr_->logs.size() || svr_->logs[log_index - 1].first != term) {
       conflictIndex = static_cast<int64_t> (log_index);
       break;
     }
@@ -145,10 +145,15 @@ void RaftServiceImpl::HandleAppendEntries(const uint64_t& term,
 
 
   if (conflictIndex != -1) {
-    svr_ -> logs.resize(static_cast<size_t>(conflictIndex - 1));
+    {
+      std::lock_guard<std::mutex> lock(svr_->logs_mutex);
+      svr_ -> logs.resize(static_cast<size_t>(conflictIndex - 1));
+    }
 
     size_t offset =static_cast<size_t>(conflictIndex - firstNewEntryIndex);
-    svr_ -> logs.insert(svr_->logs.end(), entries.begin() +offset, entries.end());
+    for (size_t i = offset; i < marshallDeputyVec.size(); ++i) {
+      svr_->logs.push_back({term, marshallDeputyVec[i].sp_data_});
+    }
   }
 
   // Log_info("flag 1g - server (on the other side) %d (request received lol)", svr_ -> loc_id_);

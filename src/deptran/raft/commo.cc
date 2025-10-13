@@ -40,7 +40,7 @@ void RaftCommo::SendRequestVote(parid_t par_id,
         /* retrieve RPC return values in order */
         fu->get_reply() >> returnedTerm;
         fu->get_reply() >> vote_granted;
-        Log_info("SendRequestVote: Received response from server %d, returnedTerm=%lu, voteGranted=%d", site_id, returnedTerm, vote_granted);
+        // Log_info("SendRequestVote: Received response from server %d, returnedTerm=%lu, voteGranted=%d", site_id, returnedTerm, vote_granted);
         /* process the RPC response here */
         if (handleVoteResponse) {
           handleVoteResponse(vote_granted, returnedTerm);

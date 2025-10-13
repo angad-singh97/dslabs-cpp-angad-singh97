@@ -45,8 +45,8 @@ void RaftServer::Setup() {
       auto now = std::chrono::steady_clock::now();
 
       if ((serverState.load() == RaftServer::FOLLOWER || serverState.load() == RaftServer::CANDIDATE) && now >= lastHeartbeatTime.load() + electionTimeout.load()) {
-        Log_info("Starting election as %s - timeout expired - SERVER %d", 
-          (serverState.load() == RaftServer::FOLLOWER) ? "FOLLOWER" : "CANDIDATE", loc_id_);
+        // Log_info("Starting election as %s - timeout expired - SERVER %d", 
+        //   (serverState.load() == RaftServer::FOLLOWER) ? "FOLLOWER" : "CANDIDATE", loc_id_);
         startElection();
         resetElectionTimeout();
       }
@@ -78,13 +78,15 @@ void RaftServer::Setup() {
           {
             std::lock_guard<std::mutex> lock(logs_mutex);
             if (currNextIndex >= 1 && currNextIndex <= (int)logs.size()) {
-              entries.insert(entries.end(), logs.begin() + (currNextIndex - 1), logs.end());
+              for (auto it = logs.begin() +(currNextIndex - 1); it!= logs.end(); ++it) {
+                entries.push_back(it->second);  //We only want the command here!!!1
+              }
             }
           }
 
           // Log_info("flag 2 - server %d -c target %d", loc_id_, (i + 1));
 
-          commo() -> SendAppendEntries(0, i, currentTerm.load(), loc_id_, prevIdx, prevTerm, commitIndex.load(), 
+          commo() -> SendAppendEntries(0, i, currentTerm.load(), loc_id_, prevIdx, prevTerm, entries, commitIndex.load(), 
           [this, i] (bool success, uint64_t returnedTerm, uint64_t followerId) {
             handleAppendResponse(success, returnedTerm, i);
           });
@@ -110,7 +112,7 @@ void RaftServer::Setup() {
         if (app_next_) {
           app_next_(*cmd);
         }
-        Log_info("Applied entry %d: term=%d", lastApplied.load(), term);
+        // Log_info("Applied entry %d: term=%d", lastApplied.load(), term);
       }
       Coroutine::Sleep(50); 
     }
@@ -123,27 +125,27 @@ void RaftServer::handleVoteResponse (bool voteGranted, uint64_t returnedTerm) {
 
   //Universal-term check, the paper says we do this for ANY request/response RPC received
   if (returnedTerm >  currentTerm.load()) {
-    Log_info("Server %d received vote response: returnedTerm=%lu, currentTerm(before conversion)=%d", loc_id_, returnedTerm, currentTerm.load());
+    // Log_info("Server %d received vote response: returnedTerm=%lu, currentTerm(before conversion)=%d", loc_id_, returnedTerm, currentTerm.load());
     convertToFollower(returnedTerm);
-    Log_info("Server %d converted to follower due to higher term in vote response. returnedTerm=%lu, currentTerm(after conversion)=%d", loc_id_, returnedTerm, currentTerm.load());
+    // Log_info("Server %d converted to follower due to higher term in vote response. returnedTerm=%lu, currentTerm(after conversion)=%d", loc_id_, returnedTerm, currentTerm.load());
     return;
   }
 
   if (serverState.load() != CANDIDATE){
-    Log_info("Ignoring late vote response: server %d is now %s (was candidate)", 
-             loc_id_, (serverState.load() == LEADER) ? "LEADER" : "FOLLOWER");
+    // Log_info("Ignoring late vote response: server %d is now %s (was candidate)", 
+    //          loc_id_, (serverState.load() == LEADER) ? "LEADER" : "FOLLOWER");
     return;
   }
 
   if (returnedTerm < currentTerm.load()) {
-    Log_info("handleVoteResponse: Received vote response with older term (returnedTerm=%lu < currentTerm=%d), no action taken. voteGranted=%d, serverState=%d, votesReceived=%d",
-         returnedTerm, currentTerm.load(), voteGranted, serverState.load(), votesReceived.load());
+    // Log_info("handleVoteResponse: Received vote response with older term (returnedTerm=%lu < currentTerm=%d), no action taken. voteGranted=%d, serverState=%d, votesReceived=%d",
+        //  returnedTerm, currentTerm.load(), voteGranted, serverState.load(), votesReceived.load());
     return;
   }
 
   if (voteGranted) {
     votesReceived.fetch_add(1);
-    Log_info("Received voteGranted=true. votesReceived=%d, currentTerm=%d, serverState=%d", votesReceived.load(), currentTerm.load(), serverState.load());
+    // Log_info("Received voteGranted=true. votesReceived=%d, currentTerm=%d, serverState=%d", votesReceived.load(), currentTerm.load(), serverState.load());
     int majority = (SERVER_COUNT/2) + 1;
     if (votesReceived.load() >= majority) {
       Log_info("LEADER TRANSITION: Server %d is now LEADER for term %lu", loc_id_, currentTerm.load());
@@ -217,7 +219,10 @@ void RaftServer::handleAppendResponse(bool success, uint64_t returnedTerm, int f
           retryEntry.push_back(logs[prevIndex].second);
         }
       }
-      commo() -> SendAppendEntries(0, followerId, currentTerm.load(), loc_id_, prevIndex, prevTerm, retryEntry, commitIndex.load(), this);
+      commo() -> SendAppendEntries(0, followerId, currentTerm.load(), loc_id_, prevIndex, prevTerm, retryEntry, commitIndex.load(), 
+      [this, followerId] (bool success, uint64_t returnedTerm, uint64_t follower_Id) {
+        handleAppendResponse(success, returnedTerm, followerId);
+      });
     }
     // // Log_info("flag 15 - server %d: handleAppendResponse", loc_id_);
 
@@ -235,11 +240,11 @@ void RaftServer::convertToFollower(uint64_t newTerm) {
 
 
   if (priorState == RaftServer::LEADER) {
-    Log_info("Server %d (Leader) stepping down for new term %lu", loc_id_, newTerm);
+    // Log_info("Server %d (Leader) stepping down for new term %lu", loc_id_, newTerm);
   } else if (priorState == RaftServer::CANDIDATE) {
     //clean up whatever was being used for the prior ongoing election we were running
     votesReceived.store(0);
-    Log_info("Server %d (Candidate) aborting election for new term %lu", loc_id_, newTerm);
+    // Log_info("Server %d (Candidate) aborting election for new term %lu", loc_id_, newTerm);
   }
 
 
@@ -286,8 +291,8 @@ void RaftServer::startElection() {
           lastLogTerm = logs.empty() ? 0 : logs.back().first;
       }
       
-      Log_info("Server %d sending RequestVote to server %d: term=%lu, lastLogIndex=%d, lastLogTerm=%d", 
-        loc_id_, i, currentTerm.load(), lastLogIndex, lastLogTerm);
+      // Log_info("Server %d sending RequestVote to server %d: term=%lu, lastLogIndex=%d, lastLogTerm=%d", 
+        // loc_id_, i, currentTerm.load(), lastLogIndex, lastLogTerm);
       commo()->SendRequestVote(0, i, currentTerm.load(), loc_id_, lastLogIndex, lastLogTerm, 
       [this](bool voteGranted, uint64_t returnedTerm){
         handleVoteResponse(voteGranted, returnedTerm);
@@ -315,11 +320,10 @@ bool RaftServer::Start(shared_ptr<Marshallable> &cmd,
   }
 
   //this command has just come from the client and I am the leader, so I can append to the log
-  logs.push_back({currentTerm.load(), cmd});
-
+  
   {
     std::lock_guard<std::mutex> lock(logs_mutex);
-    logs.push_back(newEntry);
+    logs.push_back({currentTerm.load(), cmd});
   }
 
   for (int i = 0; i < SERVER_COUNT ; i++ ){
@@ -333,7 +337,10 @@ bool RaftServer::Start(shared_ptr<Marshallable> &cmd,
         prevLogTerm = logs.size() > 1 ? logs[logs.size() - 2].first : 0;
       }
       commo() -> SendAppendEntries(0, i, currentTerm.load(), loc_id_,
-        prevLogIndex, prevLogTerm, newEntries, commitIndex.load(), this);
+        prevLogIndex, prevLogTerm, newEntries, commitIndex.load(), 
+        [this, i] (bool success, uint64_t returnedTerm, uint64_t followerId) {
+          handleAppendResponse(success, returnedTerm, i);
+        });
     }
   }
 
@@ -364,9 +371,9 @@ void RaftServer::SyncRpcExample() {
                                      0, "hello", &res);
     event->Wait(1000000); //timeout after 1000000us=1s
     if (event->status_ == Event::TIMEOUT) {
-      Log_info("timeout happens");
+      // Log_info("timeout happens");
     } else {
-      Log_info("rpc response is: %s", res.c_str()); 
+      // Log_info("rpc response is: %s", res.c_str()); 
     }
   });
 }
