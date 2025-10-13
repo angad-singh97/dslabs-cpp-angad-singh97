@@ -75,20 +75,24 @@ void RaftServer::Setup() {
           
 
           vector<shared_ptr<Marshallable>> entries;
+          vector<uint64_t> entry_terms; 
+          int sentUpToIndex;
           {
             std::lock_guard<std::mutex> lock(logs_mutex);
             if (currNextIndex >= 1 && currNextIndex <= (int)logs.size()) {
               for (auto it = logs.begin() +(currNextIndex - 1); it!= logs.end(); ++it) {
                 entries.push_back(it->second);  //We only want the command here!!!1
+                entry_terms.push_back(it->first);//no, the term was also needed...
               }
             }
+            sentUpToIndex= currNextIndex - 1 + entries.size();
           }
 
           // Log_info("flag 2 - server %d -c target %d", loc_id_, (i + 1));
 
-          commo() -> SendAppendEntries(0, i, currentTerm.load(), loc_id_, prevIdx, prevTerm, entries, commitIndex.load(), 
-          [this, i] (bool success, uint64_t returnedTerm, uint64_t followerId) {
-            handleAppendResponse(success, returnedTerm, i);
+          commo() -> SendAppendEntries(0, i, currentTerm.load(), loc_id_, prevIdx, prevTerm, entries, entry_terms, commitIndex.load(), 
+          [this, i, sentUpToIndex] (bool success, uint64_t returnedTerm, uint64_t followerId) {
+            handleAppendResponse(success, returnedTerm, i, sentUpToIndex);
           });
         } 
       }
@@ -164,23 +168,28 @@ void RaftServer::handleVoteResponse (bool voteGranted, uint64_t returnedTerm) {
   }
 }
 
-void RaftServer::handleAppendResponse(bool success, uint64_t returnedTerm, int followerId) {
+void RaftServer::handleAppendResponse(bool success, uint64_t returnedTerm, int followerId, int sentUpToIndex) {
   // Log_info("flag 10 - server %d: handleAppendResponse", loc_id_);
-  if (returnedTerm != currentTerm.load()) {
+  if (returnedTerm > currentTerm.load()) {
+      convertToFollower(returnedTerm);
+      return;
+  }
+
+  // Ignore if we're no longer leader
+  if (serverState.load() != LEADER) {
     return;
+  }
+
+  // Ignore stale responses
+  if (returnedTerm < currentTerm.load()) {
+      return;
   }
   // Log_info("flag 11 - server %d: handleAppendResponse", loc_id_);
 
   if (success) {
     // Log_info("flag 12 - server %d: handleAppendResponse", loc_id_);
-
-    int lastEntryIndex;
-    {
-      std::lock_guard<std::mutex> lock(logs_mutex);
-      lastEntryIndex = logs.size();
-    }
-    matchIndex[followerId].store(lastEntryIndex);
-    nextIndex[followerId].store(lastEntryIndex + 1);
+    matchIndex[followerId].store(sentUpToIndex);
+    nextIndex[followerId].store(sentUpToIndex + 1);
 
     {
       std::lock_guard<std::mutex> lock(logs_mutex);
@@ -209,19 +218,27 @@ void RaftServer::handleAppendResponse(bool success, uint64_t returnedTerm, int f
       int prevIndex = nextIndex[followerId].load() - 1;
       // CORRECT - Add mutex protection
       int prevTerm = 0;
-      vector<shared_ptr<Marshallable>> retryEntry;
+      vector<shared_ptr<Marshallable>> entries;
+      vector<uint64_t> entry_terms; 
+      int retrySentUpToIndex;
       {
         std::lock_guard<std::mutex> lock(logs_mutex);
-        if (prevIndex > 0) {
-          prevTerm = logs[prevIndex - 1].first;
+        if (prevIndex > 0 && prevIndex <= (int)logs.size()) {
+            prevTerm = logs[prevIndex - 1].first;
         }
-        if (prevIndex < (int)logs.size()) {
-          retryEntry.push_back(logs[prevIndex].second);
+        // Send ALL entries from nextIndex onwards
+        int currNextIdx = nextIndex[followerId].load();
+        if (currNextIdx >= 1 && currNextIdx <= (int)logs.size()) {
+            for (auto it = logs.begin() + (currNextIdx - 1); it != logs.end(); ++it) {
+                entries.push_back(it->second);
+                entry_terms.push_back(it->first);
+            }
         }
+        retrySentUpToIndex = currNextIdx - 1 + entries.size();
       }
-      commo() -> SendAppendEntries(0, followerId, currentTerm.load(), loc_id_, prevIndex, prevTerm, retryEntry, commitIndex.load(), 
-      [this, followerId] (bool success, uint64_t returnedTerm, uint64_t follower_Id) {
-        handleAppendResponse(success, returnedTerm, followerId);
+      commo() -> SendAppendEntries(0, followerId, currentTerm.load(), loc_id_, prevIndex, prevTerm, entries, entry_terms, commitIndex.load(), 
+      [this, followerId, retrySentUpToIndex] (bool success, uint64_t returnedTerm, uint64_t follower_Id) {
+        handleAppendResponse(success, returnedTerm, followerId, retrySentUpToIndex);
       });
     }
     // // Log_info("flag 15 - server %d: handleAppendResponse", loc_id_);
@@ -232,7 +249,6 @@ void RaftServer::handleAppendResponse(bool success, uint64_t returnedTerm, int f
 
 void RaftServer::convertToFollower(uint64_t newTerm) {
   ServerState priorState = serverState.load();
-
   //here we perform actions common to all prior server states
   currentTerm.store(newTerm);
   serverState.store(RaftServer::FOLLOWER);
@@ -329,17 +345,20 @@ bool RaftServer::Start(shared_ptr<Marshallable> &cmd,
   for (int i = 0; i < SERVER_COUNT ; i++ ){
     if (i != loc_id_) {
       vector<shared_ptr<Marshallable>> newEntries = {cmd};
+      vector<uint64_t> newEntryTerms = {static_cast<uint64_t>(currentTerm.load())};
       // CORRECT - Add mutex protection
       uint64_t prevLogIndex, prevLogTerm;
+      int sentUpToIndex;
       {
         std::lock_guard<std::mutex> lock(logs_mutex);
         prevLogIndex = logs.size() - 1;
         prevLogTerm = logs.size() > 1 ? logs[logs.size() - 2].first : 0;
+        sentUpToIndex = logs.size();
       }
       commo() -> SendAppendEntries(0, i, currentTerm.load(), loc_id_,
-        prevLogIndex, prevLogTerm, newEntries, commitIndex.load(), 
-        [this, i] (bool success, uint64_t returnedTerm, uint64_t followerId) {
-          handleAppendResponse(success, returnedTerm, i);
+        prevLogIndex, prevLogTerm, newEntries, newEntryTerms, commitIndex.load(), 
+        [this, i, sentUpToIndex] (bool success, uint64_t returnedTerm, uint64_t followerId) {
+          handleAppendResponse(success, returnedTerm, i, sentUpToIndex);
         });
     }
   }

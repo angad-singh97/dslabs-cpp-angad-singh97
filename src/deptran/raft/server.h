@@ -55,6 +55,8 @@ class RaftServer : public TxLogServer {
   std::atomic<int> currentTerm {0};
   std::atomic<int>  votedFor{-1};
   static const int SERVER_COUNT = 5;
+  std::mutex logs_mutex;
+  std::vector<std::pair<uint64_t, shared_ptr<Marshallable>>> logs;
 
   //volatile state variables
   std::atomic<int>  commitIndex {0};
@@ -69,8 +71,6 @@ class RaftServer : public TxLogServer {
   std::atomic<int> nextIndex[SERVER_COUNT];
   std::atomic<int> matchIndex[SERVER_COUNT];
 
-  std::mutex logs_mutex;
-  std::vector<std::pair<uint64_t, shared_ptr<Marshallable>>> logs;
 
   //holding track of election timeouts here
   std::atomic<std::chrono::steady_clock::time_point> lastHeartbeatTime;
@@ -85,7 +85,7 @@ class RaftServer : public TxLogServer {
   void resetElectionTimeout();
   void startElection();
   void handleVoteResponse(bool voteGranted, uint64_t returnedTerm);
-  void handleAppendResponse(bool success, uint64_t returnedTerm, int followerId);
+  void handleAppendResponse(bool success, uint64_t returnedTerm, int followerId, int sentUpToIndex);
   void convertToFollower(uint64_t newTerm);
 
   /* do not modify this class below here */

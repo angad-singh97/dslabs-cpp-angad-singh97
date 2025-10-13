@@ -34,6 +34,7 @@ class RaftCommo : public Communicator {
                          uint64_t prevLogIndex,
                          uint64_t prevLogTerm,
                          std::vector<shared_ptr<Marshallable>> command,
+                         std::vector<uint64_t> entry_terms,
                          uint64_t leaderCommit,
                          std::function<void(bool_t, uint64_t, uint64_t)> handleAppendResponse);
 

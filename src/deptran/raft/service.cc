@@ -66,14 +66,15 @@ void RaftServiceImpl::HandleAppendEntries(const uint64_t& term,
                                           const uint64_t& prevLogIndex,
                                           const uint64_t& prevLogTerm,
                                           const std::vector<MarshallDeputy>& marshallDeputyVec,
+                                          const std::vector<uint64_t>& entry_terms,
                                           const uint64_t& leaderCommit,
                                           uint64_t* currentTerm,
                                           bool_t* followerAppendOK,
                                           rrr::DeferredReply* defer) {
   /* Your code here */
 
-  // Log_info("RECEIVED AE: Server %d got AE from leader %d, term=%lu, prevIdx=%lu", 
-  //   svr_->loc_id_, leaderId, term, prevLogIndex);
+  // Log_info("DEBUG: Server %d HandleAppendEntries: leaderId=%lu, term=%lu, prevLogIndex=%lu, prevLogTerm=%lu, entries.size()=%zu, myTerm=%d", 
+  //          svr_->loc_id_, leaderId, term, prevLogIndex, prevLogTerm, marshallDeputyVec.size(), svr_->currentTerm.load());
 
   // Log_info("flag 1a - server (on the other side) %d (request received lol)", svr_ -> loc_id_);
 
@@ -91,6 +92,8 @@ void RaftServiceImpl::HandleAppendEntries(const uint64_t& term,
   if (term < svr_ -> currentTerm.load()) {
     *currentTerm = svr_ -> currentTerm.load();
     *followerAppendOK = false;
+    // Log_info("DEBUG: Server %d HandleAppendEntries REJECTED: term=%lu < myTerm=%d", 
+    //          svr_->loc_id_, term, svr_->currentTerm.load());
     defer -> reply();
     return;
   }
@@ -110,6 +113,8 @@ void RaftServiceImpl::HandleAppendEntries(const uint64_t& term,
           svr_ -> logs[prevLogIndex - 1].first != prevLogTerm) {
           *currentTerm = svr_->currentTerm.load();
           *followerAppendOK = false;
+          // Log_info("DEBUG: Server %d HandleAppendEntries REJECTED: prevLogIndex=%lu > logs.size()=%zu OR prevLogTerm mismatch", 
+          //          svr_->loc_id_, prevLogIndex, svr_->logs.size());
           defer->reply();
           return;
       }
@@ -130,7 +135,27 @@ void RaftServiceImpl::HandleAppendEntries(const uint64_t& term,
     // Log_info("flag 1e - server (on the other side) %d (request received lol)", svr_ -> loc_id_);
 
 
-   uint64_t firstNewEntryIndex = prevLogIndex + 1;
+
+    {
+      std::lock_guard<std::mutex> lock(svr_->logs_mutex);
+
+      for (size_t i=0; i< marshallDeputyVec.size(); i++) {
+        uint64_t entryLogIndex = prevLogIndex + 1 + i;
+
+        if (entryLogIndex > svr_ -> logs.size() || 
+        svr_->logs[entryLogIndex - 1].first != entry_terms[i]) {
+
+          svr_->logs.resize(entryLogIndex - 1);
+
+          for (size_t j = i; j < marshallDeputyVec.size() ; j++) {
+            svr_->logs.push_back({entry_terms[j], marshallDeputyVec[j].sp_data_});
+          }
+
+          break;
+        }
+      }
+    }
+   /*uint64_t firstNewEntryIndex = prevLogIndex + 1;
 
    int64_t conflictIndex  = -1;
    for (uint64_t i = 0 ; i < marshallDeputyVec.size() ; i ++ ) {
@@ -146,15 +171,27 @@ void RaftServiceImpl::HandleAppendEntries(const uint64_t& term,
 
   if (conflictIndex != -1) {
     {
+      size_t offset =static_cast<size_t>(conflictIndex - firstNewEntryIndex);
+      {
+        std::lock_guard<std::mutex> lock(svr_->logs_mutex);
+        svr_ -> logs.resize(static_cast<size_t>(conflictIndex - 1));
+        for (size_t i = offset; i < marshallDeputyVec.size(); ++i) {
+          svr_->logs.push_back({term, marshallDeputyVec[i].sp_data_});
+        }
+      }
+    }
+  } else {
+    // No conflict - append all new entries
+    {
       std::lock_guard<std::mutex> lock(svr_->logs_mutex);
-      svr_ -> logs.resize(static_cast<size_t>(conflictIndex - 1));
+      for (size_t i = 0; i < marshallDeputyVec.size(); ++i) {
+          uint64_t log_index = firstNewEntryIndex + i;
+          if (log_index > svr_->logs.size()) {
+              svr_->logs.push_back({term, marshallDeputyVec[i].sp_data_});
+          }
+      }
     }
-
-    size_t offset =static_cast<size_t>(conflictIndex - firstNewEntryIndex);
-    for (size_t i = offset; i < marshallDeputyVec.size(); ++i) {
-      svr_->logs.push_back({term, marshallDeputyVec[i].sp_data_});
-    }
-  }
+  }*/
 
   // Log_info("flag 1g - server (on the other side) %d (request received lol)", svr_ -> loc_id_);
 
@@ -174,6 +211,8 @@ void RaftServiceImpl::HandleAppendEntries(const uint64_t& term,
   // Set return values and reply
   *currentTerm = svr_->currentTerm.load();
   *followerAppendOK = true;
+  // Log_info("DEBUG: Server %d HandleAppendEntries SUCCESS: returning currentTerm=%d, followerAppendOK=true", 
+  //          svr_->loc_id_, svr_->currentTerm.load());
   defer->reply();
 
   

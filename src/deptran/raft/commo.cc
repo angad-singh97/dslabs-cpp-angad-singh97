@@ -64,6 +64,7 @@ void RaftCommo::SendAppendEntries(parid_t par_id,
                                   uint64_t prevLogIndex,
                                   uint64_t prevLogTerm,
                                   std::vector<shared_ptr<Marshallable>> command,
+                                  std::vector<uint64_t> entry_terms,
                                   uint64_t leaderCommit,
                                   std::function<void(bool_t, uint64_t, uint64_t)> handleAppendResponse) {
   /*
@@ -95,7 +96,7 @@ void RaftCommo::SendAppendEntries(parid_t par_id,
       std::vector<MarshallDeputy> marshallDeputyVec;
       for (auto& cmd : command) marshallDeputyVec.emplace_back(cmd);
 
-      Call_Async(proxy, AppendEntries, term, leaderId, prevLogIndex, prevLogTerm, marshallDeputyVec, leaderCommit, fuattr);
+      Call_Async(proxy, AppendEntries, term, leaderId, prevLogIndex, prevLogTerm, marshallDeputyVec, entry_terms, leaderCommit, fuattr);
     }
   }
   return;
