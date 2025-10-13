@@ -9,7 +9,7 @@ namespace janus {
 class TxData;
 
 class RaftServer;
-class LogStruct;
+// class LogStruct;
 class RaftCommo : public Communicator {
 
 
@@ -25,7 +25,7 @@ class RaftCommo : public Communicator {
                       uint64_t candidateId,
                       uint64_t lastLogIndex,
                       uint64_t lastlogTerm,
-                      RaftServer* raftServer);
+                      std::function<void(bool_t, uint64_t)> handleVoteResponse);
 
   void SendAppendEntries(parid_t par_id,
                          siteid_t site_id,
@@ -33,9 +33,9 @@ class RaftCommo : public Communicator {
                          uint64_t leaderId,
                          uint64_t prevLogIndex,
                          uint64_t prevLogTerm,
-                         vector<LogStruct> entries,
+                         std::vector<shared_ptr<Marshallable>> command,
                          uint64_t leaderCommit,
-                         RaftServer* raftServer);
+                         std::function<void(bool_t, uint64_t, uint64_t)> handleAppendResponse);
 
   shared_ptr<IntEvent> 
   SendString(parid_t par_id, siteid_t site_id, const string& msg, string* res);

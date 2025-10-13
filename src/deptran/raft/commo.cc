@@ -23,7 +23,7 @@ void RaftCommo::SendRequestVote(parid_t par_id,
                                 uint64_t candidateId,
                                 uint64_t lastLogIndex,
                                 uint64_t lastLogTerm,
-                                RaftServer* raftServer) {
+                                std::function<void(bool_t, uint64_t)> handleVoteResponse) {
   /*
    * Example code for sending a single RPC to server at site_id
    * You may modify and use this function or just use it as a reference
@@ -33,7 +33,7 @@ void RaftCommo::SendRequestVote(parid_t par_id,
     if (p.first == site_id) {
       RaftProxy *proxy = (RaftProxy*) p.second;
       FutureAttr fuattr;
-      fuattr.callback = [raftServer, site_id](Future* fu) {
+      fuattr.callback = [handleVoteResponse, site_id](Future* fu) {
         /* this is a handler that will be invoked when the RPC returns */
         uint64_t returnedTerm;
         bool_t vote_granted;
@@ -42,13 +42,16 @@ void RaftCommo::SendRequestVote(parid_t par_id,
         fu->get_reply() >> vote_granted;
         Log_info("SendRequestVote: Received response from server %d, returnedTerm=%lu, voteGranted=%d", site_id, returnedTerm, vote_granted);
         /* process the RPC response here */
-        raftServer -> handleVoteResponse(vote_granted, returnedTerm);
+        if (handleVoteResponse) {
+          handleVoteResponse(vote_granted, returnedTerm);
+        }
 
       };
       /* Always use Call_Async(proxy, RPC name, RPC args..., fuattr)
       * to asynchronously invoke RPCs */
-      Log_info("[COMMO] SendRequestVote: Sending RequestVote to server %d with term=%lu, candidateId=%lu, lastLogIndex=%lu, lastLogTerm=%lu",
-               site_id, candidateTerm, candidateId, lastLogIndex, lastLogTerm);
+      
+      // Log_info("[COMMO] SendRequestVote: Sending RequestVote to server %d with term=%lu, candidateId=%lu, lastLogIndex=%lu, lastLogTerm=%lu",
+      //          site_id, candidateTerm, candidateId, lastLogIndex, lastLogTerm);
       Call_Async(proxy, RequestVote, candidateTerm, candidateId, lastLogIndex, lastLogTerm, fuattr);
     }
   }
@@ -60,30 +63,42 @@ void RaftCommo::SendAppendEntries(parid_t par_id,
                                   uint64_t leaderId,
                                   uint64_t prevLogIndex,
                                   uint64_t prevLogTerm,
-                                  vector<LogStruct> entries,
+                                  std::vector<shared_ptr<Marshallable>> command,
                                   uint64_t leaderCommit,
-                                  RaftServer* raftServer) {
+                                  std::function<void(bool_t, uint64_t, uint64_t)> handleAppendResponse) {
   /*
    * More example code for sending a single RPC to server at site_id
    * You may modify and use this function or just use it as a reference
    */
+
+  //  Log_info("flag 1 - server %d - target %d", raftServer -> loc_id_, (site_id + 1));
   auto proxies = rpc_par_proxies_[par_id];
   for (auto& p : proxies) {
     if (p.first == site_id) {
       RaftProxy *proxy = (RaftProxy*) p.second;
       FutureAttr fuattr;
-      fuattr.callback = [raftServer, site_id](Future* fu) {
+      fuattr.callback = [handleAppendResponse, site_id](Future* fu) {
         uint64_t currentTerm;
         bool_t followerAppendOK;
         fu->get_reply() >> currentTerm;
         fu->get_reply() >> followerAppendOK;
-        raftServer -> handleAppendResponse(followerAppendOK, currentTerm, site_id);
+        // Log_info("SendAppendEntries: Received response from server %d, currentTerm=%lu, followerAppendOK=%d", site_id, currentTerm, followerAppendOK);
+        // Log_info("flag 5 - server %d - target %d (APPEND ENTRY RESPONSE RCVD)", raftServer -> loc_id_, (site_id));
+        if (handleAppendResponse) {
+          handleAppendResponse(followerAppendOK, currentTerm, site_id);
+        }
 
       };
       /* wrap Marshallable in a MarshallDeputy to send over RPC */
-      Call_Async(proxy, AppendEntries, term, leaderId, prevLogIndex, prevLogTerm, entries, leaderCommit, fuattr);
+      // Log_info("flag 4 - server %d - target %d (SENDING APPEND ENTRIES)", raftServer -> loc_id_, (site_id ));
+
+      std::vector<MarshallDeputy> marshallDeputyVec;
+      for (auto& cmd : command) marshallDeputyVec.emplace_back(cmd);
+
+      Call_Async(proxy, AppendEntries, term, leaderId, prevLogIndex, prevLogTerm, marshallDeputyVec, leaderCommit, fuattr);
     }
   }
+  return;
 }
 
 shared_ptr<IntEvent> 

@@ -12,7 +12,7 @@ abstract service Raft {
                       uint64_t leaderId,
                       uint64_t prevLogIndex,
                       uint64_t prevLogTerm,
-                      vector<LogStruct> entries,
+                      std::vector<MarshallDeputy> command,
                       uint64_t leaderCommit|
                       uint64_t currentTerm,
                       bool_t followerAppendOK);

@@ -11,25 +11,30 @@ namespace janus {
 
 #define HEARTBEAT_INTERVAL 100000
 
-class LogStruct  : public Marshallable {
+/*class LogStruct  : public Marshallable {
   public:
     int term;
-    shared_ptr<Marshallable> command;
+    // shared_ptr<Marshallable> command;
 
     LogStruct(): Marshallable(MarshallDeputy::CONTAINER_CMD) {}
 
     Marshal& ToMarshal(Marshal& m) const override {
       m << term;
-      MarshallDeputy md(command);
-      m << md;
+      // MarshallDeputy md(command);
+      // m << md;
       return m;
     }
 
     Marshal& FromMarshal (Marshal &m) override {
       m >> term;
-      MarshallDeputy md;
-      m >> md;
-      command = md.sp_data_; // here we get the actual data out
+      // MarshallDeputy md;
+      // m >> md;
+
+      // if (md.sp_data_) {
+      //   command = md.sp_data_; // here we get the actual data out
+      // } else {
+      //   command = nullptr;
+      // }
       return m;
     }
 
@@ -41,37 +46,38 @@ inline Marshal& operator<<(Marshal& m, const LogStruct& ls) {
 }
 inline Marshal& operator>>(Marshal& m, LogStruct& ls) {
   return ls.FromMarshal(m);
-}
+}*/
 
 class RaftServer : public TxLogServer {
  public:
   /* Your data here */
   //persistent state variables
-  int currentTerm = 0;
-  int votedFor = -1;
+  std::atomic<int> currentTerm {0};
+  std::atomic<int>  votedFor{-1};
   static const int SERVER_COUNT = 5;
 
   //volatile state variables
-  int commitIndex = 0;
-  int lastApplied = 0;
+  std::atomic<int>  commitIndex {0};
+  std::atomic<int>  lastApplied {0};
 
   enum ServerState {FOLLOWER, LEADER, CANDIDATE};
-  ServerState serverState = RaftServer::FOLLOWER;
+  std::atomic<ServerState> serverState {RaftServer::FOLLOWER};
 
   //right now there is no difference in my implementation between them
 
   //volatile state variables - only for leaders to use for sending data
-  int nextIndex[SERVER_COUNT];
-  int matchIndex[SERVER_COUNT];
+  std::atomic<int> nextIndex[SERVER_COUNT];
+  std::atomic<int> matchIndex[SERVER_COUNT];
 
-  vector<LogStruct> logs;
+  std::mutex logs_mutex;
+  std::vector<std::pair<uint64_t, shared_ptr<Marshallable>>> logs;
 
   //holding track of election timeouts here
-  std::chrono::steady_clock::time_point lastHeartbeatTime;
-  std::chrono::milliseconds electionTimeout;
+  std::atomic<std::chrono::steady_clock::time_point> lastHeartbeatTime;
+  std::atomic<std::chrono::milliseconds> electionTimeout;
 
   //tracking the election stuff here
-  int votesReceived = 0;
+  std::atomic<int> votesReceived {0};
 
 
   /* Your functions here */
