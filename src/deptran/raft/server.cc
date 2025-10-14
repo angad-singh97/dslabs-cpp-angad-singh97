@@ -87,16 +87,28 @@ void RaftServer::Setup() {
             std::lock_guard<std::mutex> lock(logs_mutex);
             if (currNextIndex >= 1 && currNextIndex <= (int)logs.size()) {
               for (auto it = logs.begin() +(currNextIndex - 1); it!= logs.end(); ++it) {
-                entries.push_back(it->second);  //We only want the command here!!!1
-                entry_terms.push_back(it->first);//no, the term was also needed...
+                entries.push_back(it->second);
+                entry_terms.push_back(it->first);
               }
             }
             sentUpToIndex= currNextIndex - 1 + entries.size();
           }
 
+          // Deep-copy entries per follower (simple marshal round-trip)
+          vector<shared_ptr<Marshallable>> entries_cloned;
+          entries_cloned.reserve(entries.size());
+          for (auto& eptr : entries) {
+            Marshal m;
+            MarshallDeputy md_orig(eptr);
+            m << md_orig;
+            MarshallDeputy md_new;
+            m >> md_new;
+            entries_cloned.push_back(md_new.sp_data_);
+          }
+
           // Log_info("SENDING HEARTBEAT: Server %d sending heartbeat to server %d, term=%d, prevIdx=%d, prevTerm=%d, entries=%zu, sentUpToIndex=%d", 
-          //   loc_id_, i, currentTerm.load(), prevIdx, prevTerm, entries.size(), sentUpToIndex);
-          commo() -> SendAppendEntries(0, i, currentTerm.load(), loc_id_, prevIdx, prevTerm, entries, entry_terms, commitIndex.load(), 
+          //   loc_id_, i, currentTerm.load(), prevIdx, prevTerm, entries_cloned.size(), sentUpToIndex);
+          commo() -> SendAppendEntries(0, i, currentTerm.load(), loc_id_, prevIdx, prevTerm, entries_cloned, entry_terms, commitIndex.load(), 
           [this, i, sentUpToIndex] (bool success, uint64_t returnedTerm, uint64_t followerId) {
             // Log_info("HEARTBEAT RESPONSE: Server %d received heartbeat response from server %d: success=%d, term=%d", 
             //   loc_id_, i, success, returnedTerm);
@@ -389,9 +401,6 @@ Log_info("START_REJECT: Server %d rejecting Start() - not leader (state=%d)",
         loc_id_, logs.size(), currentTerm.load(), logs.size());
     }
     
-    vector<shared_ptr<Marshallable>> newEntries = {cmd};
-    vector<uint64_t> newEntryTerms = {static_cast<uint64_t>(currentTerm.load())};
-    
     uint64_t prevLogIndex, prevLogTerm;
     int sentUpToIndex;
     {
@@ -408,6 +417,26 @@ Log_info("START_REJECT: Server %d rejecting Start() - not leader (state=%d)",
               // CORRECT - Add mutex protection
               // Log_info("SENDING NEW ENTRY: Server %d sending new entry to follower %d, prevLogIndex=%d, prevLogTerm=%d", 
                 // loc_id_, i, prevLogIndex, prevLogTerm);
+                // Create per-follower deep-copied command to avoid shared_ptr RefMut issues in RPC serialization
+              shared_ptr<Marshallable> cmd_copy;
+              {
+                // Try fast path via CmdData::Clone()
+                CmdData* cd = dynamic_cast<CmdData*>(cmd.get());
+                if (cd != nullptr) {
+                  CmdData* cd_clone = cd->Clone();
+                  cmd_copy.reset(static_cast<Marshallable*>(cd_clone));
+                } else {
+                  // Generic fallback: round-trip through MarshallDeputy to deep-copy
+                  Marshal m;
+                  MarshallDeputy md_orig(cmd);
+                  m << md_orig;
+                  MarshallDeputy md_new;
+                  m >> md_new;
+                  cmd_copy = md_new.sp_data_;
+                }
+              }
+              vector<shared_ptr<Marshallable>> newEntries = {cmd_copy};
+              vector<uint64_t> newEntryTerms = {static_cast<uint64_t>(currentTerm.load())};
               commo() -> SendAppendEntries(0, i, currentTerm.load(), loc_id_,
                 prevLogIndex, prevLogTerm, newEntries, newEntryTerms, commitIndex.load(), 
                 [this, i, sentUpToIndex] (bool success, uint64_t returnedTerm, uint64_t followerId) {
