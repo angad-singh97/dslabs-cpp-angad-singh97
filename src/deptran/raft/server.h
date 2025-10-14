@@ -57,7 +57,6 @@ class RaftServer : public TxLogServer {
   static const int SERVER_COUNT = 5;
   std::mutex logs_mutex;
   std::vector<std::pair<uint64_t, shared_ptr<Marshallable>>> logs;
-  static std::mutex global_rpc_mutex_;  // Serialize ALL RPC operations
 
   
   //volatile state variables
@@ -71,6 +70,7 @@ class RaftServer : public TxLogServer {
   
   //volatile state variables - only for leaders to use for sending data
   std::mutex state_mutex;
+  std::mutex start_mutex;
   int nextIndex[SERVER_COUNT];
   int matchIndex[SERVER_COUNT];
 

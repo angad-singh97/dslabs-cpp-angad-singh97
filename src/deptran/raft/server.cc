@@ -11,7 +11,7 @@
 
 namespace janus {
 
-std::mutex RaftServer::global_rpc_mutex_;
+// std::mutex RaftServer::global_rpc_mutex_;
 
 RaftServer::RaftServer(Frame * frame) {
   frame_ = frame ;
@@ -96,7 +96,6 @@ void RaftServer::Setup() {
 
           // Log_info("SENDING HEARTBEAT: Server %d sending heartbeat to server %d, term=%d, prevIdx=%d, prevTerm=%d, entries=%zu, sentUpToIndex=%d", 
           //   loc_id_, i, currentTerm.load(), prevIdx, prevTerm, entries.size(), sentUpToIndex);
-          std::lock_guard<std::mutex> rpc_lock(global_rpc_mutex_);
           commo() -> SendAppendEntries(0, i, currentTerm.load(), loc_id_, prevIdx, prevTerm, entries, entry_terms, commitIndex.load(), 
           [this, i, sentUpToIndex] (bool success, uint64_t returnedTerm, uint64_t followerId) {
             // Log_info("HEARTBEAT RESPONSE: Server %d received heartbeat response from server %d: success=%d, term=%d", 
@@ -328,7 +327,6 @@ void RaftServer::startElection() {
       
       // Log_info("SENDING VOTE REQUEST: Server %d sending vote request to server %d, term=%d, lastLogIndex=%d, lastLogTerm=%d", 
         // loc_id_, i, currentTerm.load(), lastLogIndex, lastLogTerm);
-      std::lock_guard<std::mutex> rpc_lock(global_rpc_mutex_);
       commo()->SendRequestVote(0, i, currentTerm.load(), loc_id_, lastLogIndex, lastLogTerm, 
       [this](bool voteGranted, uint64_t returnedTerm){
         // Log_info("VOTE RESPONSE: Server %d received vote response: granted=%d, term=%d", loc_id_, voteGranted, returnedTerm);
@@ -359,53 +357,79 @@ void RaftServer::extendElectionTimeout(){
 bool RaftServer::Start(shared_ptr<Marshallable> &cmd,
                        uint64_t *index,
                        uint64_t *term) {
-  /* Your code here. This function can be called from another OS thread. */
-  std::lock_guard<std::mutex> lock(state_mutex);  // Protect entire method from concurrent access
-  
+                         /* Your code here. This function can be called from another OS thread. */
+                        //  Log_info("START_ENTRY: Server %d thread entering Start()", loc_id_);
+  // std::lock_guard<std::mutex> lock(state_mutex); //concurrency protection.. first of all!
+  std::lock_guard<std::mutex> lock(start_mutex);
+  size_t logSize;
+  {
+    std::lock_guard<std::mutex> lock(logs_mutex);
+    logSize = logs.size();
+  }
+  // Log_info("START_LOCKED: Server %d acquired state_mutex, serverState=%d, currentTerm=%d, logSize=%zu", 
+  //   loc_id_, serverState.load(), currentTerm.load(), logSize);
+
+
   if (serverState.load() != RaftServer::LEADER) {
+    // If NOT leader
+Log_info("START_REJECT: Server %d rejecting Start() - not leader (state=%d)", 
+  loc_id_, serverState.load());
     return false;
   }
 
-  //this command has just come from the client and I am the leader, so I can append to the log
-  // Log_info("NEW ENTRY: Server %d appending new entry to log, term=%d, logSize=%zu", 
-    // loc_id_, currentTerm.load(), logs.size());
-  
-  {
-    std::lock_guard<std::mutex> lock(logs_mutex);
-    logs.push_back({currentTerm.load(), cmd});
-  }
 
-  for (int i = 0; i < SERVER_COUNT ; i++ ){
-    if (i != loc_id_) {
-      vector<shared_ptr<Marshallable>> newEntries = {cmd};
-      vector<uint64_t> newEntryTerms = {static_cast<uint64_t>(currentTerm.load())};
-      // CORRECT - Add mutex protection
-      uint64_t prevLogIndex, prevLogTerm;
-      int sentUpToIndex;
-      {
-        std::lock_guard<std::mutex> lock(logs_mutex);
-        prevLogIndex = logs.size() - 1;
-        prevLogTerm = logs.size() > 1 ? logs[logs.size() - 2].first : 0;
-        sentUpToIndex = logs.size();
-      }
-      // Log_info("SENDING NEW ENTRY: Server %d sending new entry to follower %d, prevLogIndex=%d, prevLogTerm=%d", 
-        // loc_id_, i, prevLogIndex, prevLogTerm);
-      std::lock_guard<std::mutex> rpc_lock(global_rpc_mutex_);
-      commo() -> SendAppendEntries(0, i, currentTerm.load(), loc_id_,
-        prevLogIndex, prevLogTerm, newEntries, newEntryTerms, commitIndex.load(), 
-        [this, i, sentUpToIndex] (bool success, uint64_t returnedTerm, uint64_t followerId) {
-          // Log_info("NEW ENTRY RESPONSE: Server %d received new entry response from follower %d: success=%d", 
-          //   loc_id_, i, success);
-          handleAppendResponse(success, returnedTerm, i, sentUpToIndex);
-        });
+     //this command has just come from the client and I am the leader, so I can append to the log
+     
+     {
+       std::lock_guard<std::mutex> lock(logs_mutex);
+       Log_info("NEW ENTRY: Server %d appending new entry to log, term=%d, logSize=%zu", 
+         loc_id_, currentTerm.load(), logs.size());
+      logs.push_back({currentTerm.load(), cmd});
+      Log_info("START_APPEND: Server %d appended entry, NEW logSize=%zu, term=%d, index will be %zu", 
+        loc_id_, logs.size(), currentTerm.load(), logs.size());
     }
-  }
+    
+    vector<shared_ptr<Marshallable>> newEntries = {cmd};
+    vector<uint64_t> newEntryTerms = {static_cast<uint64_t>(currentTerm.load())};
+    
+    uint64_t prevLogIndex, prevLogTerm;
+    int sentUpToIndex;
+    {
+      std::lock_guard<std::mutex> lock(logs_mutex);
+      prevLogIndex = logs.size() - 1;
+      prevLogTerm = logs.size() > 1 ? logs[logs.size() - 2].first : 0;
+      sentUpToIndex = logs.size();
+    }
+
+    
+
+      for (int i = 0; i < SERVER_COUNT ; i++ ){
+        if (i != loc_id_) {
+              // CORRECT - Add mutex protection
+              // Log_info("SENDING NEW ENTRY: Server %d sending new entry to follower %d, prevLogIndex=%d, prevLogTerm=%d", 
+                // loc_id_, i, prevLogIndex, prevLogTerm);
+              commo() -> SendAppendEntries(0, i, currentTerm.load(), loc_id_,
+                prevLogIndex, prevLogTerm, newEntries, newEntryTerms, commitIndex.load(), 
+                [this, i, sentUpToIndex] (bool success, uint64_t returnedTerm, uint64_t followerId) {
+                  // Log_info("NEW ENTRY RESPONSE: Server %d received new entry response from follower %d: success=%d", 
+                  //   loc_id_, i, success);
+                  handleAppendResponse(success, returnedTerm, i, sentUpToIndex);
+                });
+                // Inside the loop, for EACH follower
+        Log_info("START_REPLICATE: Server %d sending entry to follower %d, prevLogIndex=%d, prevLogTerm=%d, sentUpToIndex=%d", 
+          loc_id_, i, prevLogIndex, prevLogTerm, sentUpToIndex);
+          
+        }
+      }
+    
 
   {
     std::lock_guard<std::mutex> lock(logs_mutex);
     *index = logs.size();
   }
   *term = currentTerm.load();
+  Log_info("START_RETURN: Server %d returning SUCCESS, index=%d, term=%d", 
+    loc_id_, *index, *term);
   return true;
 }
 
