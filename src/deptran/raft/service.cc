@@ -23,9 +23,10 @@ void RaftServiceImpl::HandleRequestVote(const uint64_t& candidateTerm,
                                         rrr::DeferredReply* defer) 
                                         {
   /* Your code here */
+  std::lock_guard<std::mutex> rpc_lock(rpc_handler_mutex_);
 
-  Log_info("VOTE REQUEST: Server %d received vote request from candidate %d, term=%d, lastLogIndex=%d, lastLogTerm=%d, myTerm=%d, votedFor=%d", 
-    svr_->loc_id_, candidateId, candidateTerm, lastLogIndex, lastLogTerm, svr_->currentTerm.load(), svr_->votedFor.load());
+  // Log_info("VOTE REQUEST: Server %d received vote request from candidate %d, term=%d, lastLogIndex=%d, lastLogTerm=%d, myTerm=%d, votedFor=%d", 
+  //   svr_->loc_id_, candidateId, candidateTerm, lastLogIndex, lastLogTerm, svr_->currentTerm.load(), svr_->votedFor.load());
 
   //Universal-term check, the paper says we do this for ANY request/response RPC received
   if (candidateTerm > svr_ -> currentTerm.load()) {
@@ -45,8 +46,8 @@ void RaftServiceImpl::HandleRequestVote(const uint64_t& candidateTerm,
   bool areLogsStale = (lastLogTerm < myLastLogTerm) || (lastLogTerm == myLastLogTerm && lastLogIndex < myLastLogIndex);
 
   if (isStaleRequest || alreadyVotedForDifferentServer || areLogsStale) {
-    Log_info("VOTE DENIED: Server %d denying vote to candidate %d (stale=%d, alreadyVoted=%d, logsStale=%d)", 
-      svr_->loc_id_, candidateId, isStaleRequest, alreadyVotedForDifferentServer, areLogsStale);
+    // Log_info("VOTE DENIED: Server %d denying vote to candidate %d (stale=%d, alreadyVoted=%d, logsStale=%d)", 
+    //   svr_->loc_id_, candidateId, isStaleRequest, alreadyVotedForDifferentServer, areLogsStale);
     *vote_granted = false;
     *currentTerm = svr_ -> currentTerm.load();
     defer->reply();
@@ -54,7 +55,7 @@ void RaftServiceImpl::HandleRequestVote(const uint64_t& candidateTerm,
   } 
 
   //grant the vote!
-  Log_info("VOTE GRANTED: Server %d granting vote to candidate %d", svr_->loc_id_, candidateId);
+  // Log_info("VOTE GRANTED: Server %d granting vote to candidate %d", svr_->loc_id_, candidateId);
   svr_ -> votedFor.store(candidateId);
   svr_ -> lastHeartbeatTime.store(std::chrono::steady_clock::now());
   // svr_ -> resetElectionTimeout(); - we will only do this when starting elections mainly
@@ -74,10 +75,11 @@ void RaftServiceImpl::HandleAppendEntries(const uint64_t& term,
                                           uint64_t* currentTerm,
                                           bool_t* followerAppendOK,
                                           rrr::DeferredReply* defer) {
+   std::lock_guard<std::mutex> rpc_lock(rpc_handler_mutex_);
   /* Your code here */
 
-  Log_info("APPEND REQUEST: Server %d received append request from leader %d, term=%d, prevLogIndex=%d, prevLogTerm=%d, entries=%zu, myTerm=%d", 
-            svr_->loc_id_, leaderId, term, prevLogIndex, prevLogTerm, marshallDeputyVec.size(), svr_->currentTerm.load());
+  // Log_info("APPEND REQUEST: Server %d received append request from leader %d, term=%d, prevLogIndex=%d, prevLogTerm=%d, entries=%zu, myTerm=%d", 
+  //           svr_->loc_id_, leaderId, term, prevLogIndex, prevLogTerm, marshallDeputyVec.size(), svr_->currentTerm.load());
 
     
   //Universal-term check, the paper says we do this for ANY request/response RPC received
@@ -91,8 +93,8 @@ void RaftServiceImpl::HandleAppendEntries(const uint64_t& term,
 
   //reject it if the term is lower
   if (term < svr_ -> currentTerm.load()) {
-    Log_info("APPEND REJECTED: Server %d rejecting append from leader %d (stale term %d < %d)", 
-      svr_->loc_id_, leaderId, term, svr_->currentTerm.load());
+    // Log_info("APPEND REJECTED: Server %d rejecting append from leader %d (stale term %d < %d)", 
+      // svr_->loc_id_, leaderId, term, svr_->currentTerm.load());
     *currentTerm = svr_ -> currentTerm.load();
     *followerAppendOK = false;
     defer -> reply();
@@ -110,10 +112,19 @@ void RaftServiceImpl::HandleAppendEntries(const uint64_t& term,
   if (prevLogIndex > 0) {
     {
       std::lock_guard<std::mutex> lock(svr_->logs_mutex);
-      if (prevLogIndex > svr_ -> logs.size() || 
-          svr_ -> logs[prevLogIndex - 1].first != prevLogTerm) {
-          Log_info("APPEND REJECTED: Server %d rejecting append (prevLogIndex=%d > logs.size()=%zu OR prevLogTerm mismatch: %d != %d)", 
-            svr_->loc_id_, prevLogIndex, svr_->logs.size(), svr_->logs[prevLogIndex - 1].first, prevLogTerm);
+      if (prevLogIndex > svr_->logs.size()) {
+          // Log_info("APPEND REJECTED: Server %d rejecting append (prevLogIndex=%d > logs.size()=%zu)", 
+          //   svr_->loc_id_, prevLogIndex, svr_->logs.size());
+          svr_->extendElectionTimeout();  // Extend timeout - we're out-of-date!
+          *currentTerm = svr_->currentTerm.load();
+          *followerAppendOK = false;
+          defer->reply();
+          return;
+      }
+      if (svr_->logs[prevLogIndex - 1].first != prevLogTerm) {
+          // Log_info("APPEND REJECTED: Server %d rejecting append (prevLogTerm mismatch: %d != %d at index %d)", 
+          //   svr_->loc_id_, svr_->logs[prevLogIndex - 1].first, prevLogTerm, prevLogIndex);
+          svr_->extendElectionTimeout();  // Extend timeout - we're out-of-date!
           *currentTerm = svr_->currentTerm.load();
           *followerAppendOK = false;
           defer->reply();
@@ -146,8 +157,8 @@ void RaftServiceImpl::HandleAppendEntries(const uint64_t& term,
         if (entryLogIndex > svr_ -> logs.size() || 
         svr_->logs[entryLogIndex - 1].first != entry_terms[i]) {
 
-          Log_info("CONFLICT DETECTED: Server %d truncating logs at index %d, appending %zu entries from leader", 
-            svr_->loc_id_, entryLogIndex - 1, marshallDeputyVec.size() - i);
+          // Log_info("CONFLICT DETECTED: Server %d truncating logs at index %d, appending %zu entries from leader", 
+          //   svr_->loc_id_, entryLogIndex - 1, marshallDeputyVec.size() - i);
           svr_->logs.resize(entryLogIndex - 1);
 
           for (size_t j = i; j < marshallDeputyVec.size() ; j++) {
@@ -205,8 +216,8 @@ void RaftServiceImpl::HandleAppendEntries(const uint64_t& term,
         std::lock_guard<std::mutex> lock(svr_->logs_mutex);
         lastNewEntryIndex = svr_->logs.size();
     }
-    Log_info("COMMIT UPDATE: Server %d updating commitIndex from %d to %d", 
-      svr_->loc_id_, svr_->commitIndex.load(), std::min(leaderCommit, lastNewEntryIndex));
+    // Log_info("COMMIT UPDATE: Server %d updating commitIndex from %d to %d", 
+    //   svr_->loc_id_, svr_->commitIndex.load(), std::min(leaderCommit, lastNewEntryIndex));
     svr_->commitIndex.store(std::min(leaderCommit, lastNewEntryIndex));
   }
   
@@ -214,8 +225,9 @@ void RaftServiceImpl::HandleAppendEntries(const uint64_t& term,
 
 
   // Set return values and reply
-  Log_info("APPEND SUCCESS: Server %d successfully processed append from leader %d, logSize=%zu", 
-    svr_->loc_id_, leaderId, svr_->logs.size());
+  // Log_info("APPEND SUCCESS: Server %d successfully processed append from leader %d, logSize=%zu", 
+  //   svr_->loc_id_, leaderId, svr_->logs.size());
+    svr_ -> resetElectionTimeout();  // Reset to normal timeout - we're caught up!
   *currentTerm = svr_->currentTerm.load();
   *followerAppendOK = true;
   defer->reply();

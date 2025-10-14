@@ -57,19 +57,22 @@ class RaftServer : public TxLogServer {
   static const int SERVER_COUNT = 5;
   std::mutex logs_mutex;
   std::vector<std::pair<uint64_t, shared_ptr<Marshallable>>> logs;
+  static std::mutex global_rpc_mutex_;  // Serialize ALL RPC operations
 
+  
   //volatile state variables
   std::atomic<int>  commitIndex {0};
   std::atomic<int>  lastApplied {0};
-
+  
   enum ServerState {FOLLOWER, LEADER, CANDIDATE};
   std::atomic<ServerState> serverState {RaftServer::FOLLOWER};
-
+  
   //right now there is no difference in my implementation between them
-
+  
   //volatile state variables - only for leaders to use for sending data
-  std::atomic<int> nextIndex[SERVER_COUNT];
-  std::atomic<int> matchIndex[SERVER_COUNT];
+  std::mutex state_mutex;
+  int nextIndex[SERVER_COUNT];
+  int matchIndex[SERVER_COUNT];
 
 
   //holding track of election timeouts here
@@ -83,6 +86,7 @@ class RaftServer : public TxLogServer {
   /* Your functions here */
 
   void resetElectionTimeout();
+  void extendElectionTimeout();
   void startElection();
   void handleVoteResponse(bool voteGranted, uint64_t returnedTerm);
   void handleAppendResponse(bool success, uint64_t returnedTerm, int followerId, int sentUpToIndex);

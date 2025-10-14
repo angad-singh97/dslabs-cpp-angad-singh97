@@ -19,6 +19,7 @@ class RaftServer;
 class RaftServiceImpl : public RaftService {
  public:
   RaftServer* svr_;
+  std::mutex rpc_handler_mutex_; 
   RaftServiceImpl(TxLogServer* sched);
 
 

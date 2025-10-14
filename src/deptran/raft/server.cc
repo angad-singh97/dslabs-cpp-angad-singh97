@@ -11,6 +11,8 @@
 
 namespace janus {
 
+std::mutex RaftServer::global_rpc_mutex_;
+
 RaftServer::RaftServer(Frame * frame) {
   frame_ = frame ;
   /* Your code here for server initialization. Note that this function is 
@@ -45,8 +47,8 @@ void RaftServer::Setup() {
       auto now = std::chrono::steady_clock::now();
 
       if ((serverState.load() == RaftServer::FOLLOWER || serverState.load() == RaftServer::CANDIDATE) && now >= lastHeartbeatTime.load() + electionTimeout.load()) {
-        Log_info("ELECTION TIMEOUT: Server %d starting election as %s - timeout expired", 
-          loc_id_, (serverState.load() == RaftServer::FOLLOWER) ? "FOLLOWER" : "CANDIDATE");
+        // Log_info("ELECTION TIMEOUT: Server %d starting election as %s - timeout expired", 
+          // loc_id_, (serverState.load() == RaftServer::FOLLOWER) ? "FOLLOWER" : "CANDIDATE");
         startElection();
         resetElectionTimeout();
       }
@@ -63,7 +65,11 @@ void RaftServer::Setup() {
           if (i == loc_id_) continue;
           // Log_info("flag 1 - server %d - target %d", loc_id_, (i + 1));
 
-          int currNextIndex = nextIndex[i].load();
+          int currNextIndex;
+          {
+            std::lock_guard<std::mutex> lock(state_mutex);
+            currNextIndex = nextIndex[i];
+          }
           int prevIdx = currNextIndex - 1;
           uint64_t prevTerm = 0;
           {
@@ -88,13 +94,13 @@ void RaftServer::Setup() {
             sentUpToIndex= currNextIndex - 1 + entries.size();
           }
 
-          Log_info("SENDING HEARTBEAT: Server %d sending heartbeat to server %d, term=%d, prevIdx=%d, prevTerm=%d, entries=%zu, sentUpToIndex=%d", 
-            loc_id_, i, currentTerm.load(), prevIdx, prevTerm, entries.size(), sentUpToIndex);
-
+          // Log_info("SENDING HEARTBEAT: Server %d sending heartbeat to server %d, term=%d, prevIdx=%d, prevTerm=%d, entries=%zu, sentUpToIndex=%d", 
+          //   loc_id_, i, currentTerm.load(), prevIdx, prevTerm, entries.size(), sentUpToIndex);
+          std::lock_guard<std::mutex> rpc_lock(global_rpc_mutex_);
           commo() -> SendAppendEntries(0, i, currentTerm.load(), loc_id_, prevIdx, prevTerm, entries, entry_terms, commitIndex.load(), 
           [this, i, sentUpToIndex] (bool success, uint64_t returnedTerm, uint64_t followerId) {
-            Log_info("HEARTBEAT RESPONSE: Server %d received heartbeat response from server %d: success=%d, term=%d", 
-              loc_id_, i, success, returnedTerm);
+            // Log_info("HEARTBEAT RESPONSE: Server %d received heartbeat response from server %d: success=%d, term=%d", 
+            //   loc_id_, i, success, returnedTerm);
             handleAppendResponse(success, returnedTerm, i, sentUpToIndex);
           });
         } 
@@ -159,11 +165,17 @@ void RaftServer::handleVoteResponse (bool voteGranted, uint64_t returnedTerm) {
       serverState.store(RaftServer::LEADER);
       votesReceived.store(0); // Reset vote counter after becoming leader
 
-      std::lock_guard<std::mutex> lock(logs_mutex);
-      int nextLogIndex = logs.size() + 1;
-      for (int i = 0; i < SERVER_COUNT ; i++){
-        nextIndex[i].store(nextLogIndex);
-        matchIndex[i].store(0);
+      int nextLogIndex;
+      {
+        std::lock_guard<std::mutex> lock(logs_mutex);
+        nextLogIndex = logs.size() + 1;
+      }
+      {
+        std::lock_guard<std::mutex> lock(state_mutex);
+        for (int i = 0; i < SERVER_COUNT ; i++){
+          nextIndex[i] = nextLogIndex;
+          matchIndex[i] = 0;
+        }
       }
 
       return;
@@ -173,6 +185,7 @@ void RaftServer::handleVoteResponse (bool voteGranted, uint64_t returnedTerm) {
 
 void RaftServer::handleAppendResponse(bool success, uint64_t returnedTerm, int followerId, int sentUpToIndex) {
   // Log_info("flag 10 - server %d: handleAppendResponse", loc_id_);
+  
   if (returnedTerm > currentTerm.load()) {
       convertToFollower(returnedTerm);
       return;
@@ -190,24 +203,41 @@ void RaftServer::handleAppendResponse(bool success, uint64_t returnedTerm, int f
   // Log_info("flag 11 - server %d: handleAppendResponse", loc_id_);
 
   if (success) {
-    Log_info("APPEND SUCCESS: Server %d updating follower %d: matchIndex=%d, nextIndex=%d", 
-      loc_id_, followerId, sentUpToIndex, sentUpToIndex + 1);
-    matchIndex[followerId].store(sentUpToIndex);
-    nextIndex[followerId].store(sentUpToIndex + 1);
+    // Log_info("APPEND SUCCESS: Server %d updating follower %d: matchIndex=%d, nextIndex=%d", 
+      // loc_id_, followerId, sentUpToIndex, sentUpToIndex + 1);
+    {
+      std::lock_guard<std::mutex> lock(state_mutex);
+      matchIndex[followerId] = sentUpToIndex;
+      nextIndex[followerId] = sentUpToIndex + 1;
+    }
 
     {
-      std::lock_guard<std::mutex> lock(logs_mutex);
-      for (int i = logs.size(); i > commitIndex.load() ; i-- ) {
-        if(logs[i-1].first == currentTerm.load()) {
+      int logsSize;
+      {
+        std::lock_guard<std::mutex> lock(logs_mutex);
+        logsSize = logs.size();
+      }
+      
+      for (int i = logsSize; i > commitIndex.load() ; i-- ) {
+        bool isCurrentTerm;
+        {
+          std::lock_guard<std::mutex> lock(logs_mutex);
+          isCurrentTerm = (logs[i-1].first == currentTerm.load());
+        }
+        
+        if (isCurrentTerm) {
           int count = 1;
-          for (int j = 0 ; j< SERVER_COUNT; j++) {
-            if(j != loc_id_ && matchIndex[j].load() >= i) {
-              count++;
+          {
+            std::lock_guard<std::mutex> lock(state_mutex);
+            for (int j = 0 ; j< SERVER_COUNT; j++) {
+              if(j != loc_id_ && matchIndex[j] >= i) {
+                count++;
+              }
             }
           }
           if (count > SERVER_COUNT/2) {
-            Log_info("COMMIT UPDATE: Server %d committing index %d (count=%d, needed=%d)", 
-              loc_id_, i, count, SERVER_COUNT/2 + 1);
+            // Log_info("COMMIT UPDATE: Server %d committing index %d (count=%d, needed=%d)", 
+              // loc_id_, i, count, SERVER_COUNT/2 + 1);
             commitIndex.store(i);
             break;
           }
@@ -219,40 +249,14 @@ void RaftServer::handleAppendResponse(bool success, uint64_t returnedTerm, int f
   } else {
     // Log_info("flag 14 - server %d: handleAppendResponse", loc_id_);
 
-    Log_info("APPEND FAILED: Server %d retrying follower %d, decrementing nextIndex from %d to %d", 
-      loc_id_, followerId, nextIndex[followerId].load(), nextIndex[followerId].load() - 1);
-    nextIndex[followerId].fetch_sub(1);
-    if (nextIndex[followerId].load() > 0) {
-      int prevIndex = nextIndex[followerId].load() - 1;
-      // CORRECT - Add mutex protection
-      int prevTerm = 0;
-      vector<shared_ptr<Marshallable>> entries;
-      vector<uint64_t> entry_terms; 
-      int retrySentUpToIndex;
-      {
-        std::lock_guard<std::mutex> lock(logs_mutex);
-        if (prevIndex > 0 && prevIndex <= (int)logs.size()) {
-            prevTerm = logs[prevIndex - 1].first;
-        }
-        // Send ALL entries from nextIndex onwards
-        int currNextIdx = nextIndex[followerId].load();
-        if (currNextIdx >= 1 && currNextIdx <= (int)logs.size()) {
-            for (auto it = logs.begin() + (currNextIdx - 1); it != logs.end(); ++it) {
-                entries.push_back(it->second);
-                entry_terms.push_back(it->first);
-            }
-        }
-        retrySentUpToIndex = currNextIdx - 1 + entries.size();
-      }
-      Log_info("RETRY APPEND: Server %d retrying append to follower %d, prevIndex=%d, prevTerm=%d, entries=%zu", 
-        loc_id_, followerId, prevIndex, prevTerm, entries.size());
-      commo() -> SendAppendEntries(0, followerId, currentTerm.load(), loc_id_, prevIndex, prevTerm, entries, entry_terms, commitIndex.load(), 
-      [this, followerId, retrySentUpToIndex] (bool success, uint64_t returnedTerm, uint64_t follower_Id) {
-        Log_info("RETRY RESPONSE: Server %d received retry response from follower %d: success=%d", 
-          loc_id_, followerId, success);
-        handleAppendResponse(success, returnedTerm, followerId, retrySentUpToIndex);
-      });
+    {
+      std::lock_guard<std::mutex> lock(state_mutex);
+      int oldNextIndex = nextIndex[followerId];
+      nextIndex[followerId]--;
+      // Log_info("APPEND FAILED: Server %d retrying follower %d, decrementing nextIndex from %d to %d", 
+        // loc_id_, followerId, oldNextIndex, nextIndex[followerId]);
     }
+    // Let the heartbeat loop handle the retry on next cycle - no immediate RPC!
     // // Log_info("flag 15 - server %d: handleAppendResponse", loc_id_);
 
   }
@@ -261,8 +265,8 @@ void RaftServer::handleAppendResponse(bool success, uint64_t returnedTerm, int f
 
 void RaftServer::convertToFollower(uint64_t newTerm) {
   ServerState priorState = serverState.load();
-  Log_info("STATE CHANGE: Server %d converting to FOLLOWER (was %d), newTerm=%d", 
-    loc_id_, priorState, newTerm);
+  // Log_info("STATE CHANGE: Server %d converting to FOLLOWER (was %d), newTerm=%d", 
+    // loc_id_, priorState, newTerm);
   //here we perform actions common to all prior server states
   currentTerm.store(newTerm);
   serverState.store(RaftServer::FOLLOWER);
@@ -270,11 +274,11 @@ void RaftServer::convertToFollower(uint64_t newTerm) {
 
 
   if (priorState == RaftServer::LEADER) {
-    Log_info("LEADER STEPDOWN: Server %d (Leader) stepping down for new term %d", loc_id_, newTerm);
+    // Log_info("LEADER STEPDOWN: Server %d (Leader) stepping down for new term %d", loc_id_, newTerm);
   } else if (priorState == RaftServer::CANDIDATE) {
     //clean up whatever was being used for the prior ongoing election we were running
     votesReceived.store(0);
-    Log_info("CANDIDATE ABORT: Server %d (Candidate) aborting election for new term %d", loc_id_, newTerm);
+    // Log_info("CANDIDATE ABORT: Server %d (Candidate) aborting election for new term %d", loc_id_, newTerm);
   }
 
 
@@ -290,7 +294,7 @@ void RaftServer::startElection() {
   //increment currentTerm
   currentTerm.fetch_add(1);
 
-  Log_info("ELECTION START: Server %d starting election for term %d", loc_id_, currentTerm.load());
+  // Log_info("ELECTION START: Server %d starting election for term %d", loc_id_, currentTerm.load());
 
   //vote for self
   votedFor.store(loc_id_);
@@ -322,11 +326,12 @@ void RaftServer::startElection() {
           lastLogTerm = logs.empty() ? 0 : logs.back().first;
       }
       
-      Log_info("SENDING VOTE REQUEST: Server %d sending vote request to server %d, term=%d, lastLogIndex=%d, lastLogTerm=%d", 
-        loc_id_, i, currentTerm.load(), lastLogIndex, lastLogTerm);
+      // Log_info("SENDING VOTE REQUEST: Server %d sending vote request to server %d, term=%d, lastLogIndex=%d, lastLogTerm=%d", 
+        // loc_id_, i, currentTerm.load(), lastLogIndex, lastLogTerm);
+      std::lock_guard<std::mutex> rpc_lock(global_rpc_mutex_);
       commo()->SendRequestVote(0, i, currentTerm.load(), loc_id_, lastLogIndex, lastLogTerm, 
       [this](bool voteGranted, uint64_t returnedTerm){
-        Log_info("VOTE RESPONSE: Server %d received vote response: granted=%d, term=%d", loc_id_, voteGranted, returnedTerm);
+        // Log_info("VOTE RESPONSE: Server %d received vote response: granted=%d, term=%d", loc_id_, voteGranted, returnedTerm);
         handleVoteResponse(voteGranted, returnedTerm);
       });
     }
@@ -342,18 +347,28 @@ void RaftServer::resetElectionTimeout(){
   electionTimeout.store(std::chrono::milliseconds(randomDuration));
 }
 
+void RaftServer::extendElectionTimeout(){
+  // Extend timeout by 3-4x for out-of-date followers to give leader time to catch up
+  int randomDuration = 600 + (rand() % 401);          // 600 to 1000 ms (3-4x longer)
+  electionTimeout.store(std::chrono::milliseconds(randomDuration));
+  // Log_info("TIMEOUT EXTENDED: Server %d extending election timeout to %d ms (out-of-date)", 
+    // loc_id_, randomDuration);
+}
+
 
 bool RaftServer::Start(shared_ptr<Marshallable> &cmd,
                        uint64_t *index,
                        uint64_t *term) {
   /* Your code here. This function can be called from another OS thread. */
+  std::lock_guard<std::mutex> lock(state_mutex);  // Protect entire method from concurrent access
+  
   if (serverState.load() != RaftServer::LEADER) {
     return false;
   }
 
   //this command has just come from the client and I am the leader, so I can append to the log
-  Log_info("NEW ENTRY: Server %d appending new entry to log, term=%d, logSize=%zu", 
-    loc_id_, currentTerm.load(), logs.size());
+  // Log_info("NEW ENTRY: Server %d appending new entry to log, term=%d, logSize=%zu", 
+    // loc_id_, currentTerm.load(), logs.size());
   
   {
     std::lock_guard<std::mutex> lock(logs_mutex);
@@ -373,13 +388,14 @@ bool RaftServer::Start(shared_ptr<Marshallable> &cmd,
         prevLogTerm = logs.size() > 1 ? logs[logs.size() - 2].first : 0;
         sentUpToIndex = logs.size();
       }
-      Log_info("SENDING NEW ENTRY: Server %d sending new entry to follower %d, prevLogIndex=%d, prevLogTerm=%d", 
-        loc_id_, i, prevLogIndex, prevLogTerm);
+      // Log_info("SENDING NEW ENTRY: Server %d sending new entry to follower %d, prevLogIndex=%d, prevLogTerm=%d", 
+        // loc_id_, i, prevLogIndex, prevLogTerm);
+      std::lock_guard<std::mutex> rpc_lock(global_rpc_mutex_);
       commo() -> SendAppendEntries(0, i, currentTerm.load(), loc_id_,
         prevLogIndex, prevLogTerm, newEntries, newEntryTerms, commitIndex.load(), 
         [this, i, sentUpToIndex] (bool success, uint64_t returnedTerm, uint64_t followerId) {
-          Log_info("NEW ENTRY RESPONSE: Server %d received new entry response from follower %d: success=%d", 
-            loc_id_, i, success);
+          // Log_info("NEW ENTRY RESPONSE: Server %d received new entry response from follower %d: success=%d", 
+          //   loc_id_, i, success);
           handleAppendResponse(success, returnedTerm, i, sentUpToIndex);
         });
     }
