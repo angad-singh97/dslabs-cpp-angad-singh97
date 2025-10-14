@@ -58,6 +58,8 @@ void RaftServer::Setup() {
 
   });
 
+
+
   Coroutine::CreateRun([this]() {
     while (true) {
       if (serverState.load() == RaftServer::LEADER) {
@@ -75,40 +77,28 @@ void RaftServer::Setup() {
           {
             std::lock_guard<std::mutex> lock(logs_mutex);
             if (prevIdx > 0 && prevIdx <= (int)logs.size()) {
-              prevTerm = logs[prevIdx - 1].first;
+              prevTerm = logs[prevIdx - 1].term;
             }
           }
           
 
-          vector<shared_ptr<Marshallable>> entries;
-          vector<uint64_t> entry_terms; 
+          vector<LogStruct> entries;
           int sentUpToIndex;
           {
             std::lock_guard<std::mutex> lock(logs_mutex);
             if (currNextIndex >= 1 && currNextIndex <= (int)logs.size()) {
               for (auto it = logs.begin() +(currNextIndex - 1); it!= logs.end(); ++it) {
-                entries.push_back(it->second);
-                entry_terms.push_back(it->first);
+                entries.push_back({it->cmd, it->term});
               }
             }
             sentUpToIndex= currNextIndex - 1 + entries.size();
           }
 
-          // Deep-copy entries per follower (simple marshal round-trip)
-          vector<shared_ptr<Marshallable>> entries_cloned;
-          entries_cloned.reserve(entries.size());
-          for (auto& eptr : entries) {
-            Marshal m;
-            MarshallDeputy md_orig(eptr);
-            m << md_orig;
-            MarshallDeputy md_new;
-            m >> md_new;
-            entries_cloned.push_back(md_new.sp_data_);
-          }
+     
 
           // Log_info("SENDING HEARTBEAT: Server %d sending heartbeat to server %d, term=%d, prevIdx=%d, prevTerm=%d, entries=%zu, sentUpToIndex=%d", 
           //   loc_id_, i, currentTerm.load(), prevIdx, prevTerm, entries_cloned.size(), sentUpToIndex);
-          commo() -> SendAppendEntries(0, i, currentTerm.load(), loc_id_, prevIdx, prevTerm, entries_cloned, entry_terms, commitIndex.load(), 
+          commo() -> SendAppendEntries(0, i, currentTerm.load(), loc_id_, prevIdx, prevTerm, entries, commitIndex.load(), 
           [this, i, sentUpToIndex] (bool success, uint64_t returnedTerm, uint64_t followerId) {
             // Log_info("HEARTBEAT RESPONSE: Server %d received heartbeat response from server %d: success=%d, term=%d", 
             //   loc_id_, i, success, returnedTerm);
@@ -130,8 +120,8 @@ void RaftServer::Setup() {
         int term;
         {
           std::lock_guard<std::mutex> lock(logs_mutex);
-          cmd = logs[lastApplied.load()-1].second;
-          term = logs[lastApplied.load()-1].first;
+          cmd = logs[lastApplied.load()-1].cmd;
+          term = logs[lastApplied.load()-1].term;
         }
         if (app_next_) {
           app_next_(*cmd);
@@ -233,7 +223,7 @@ void RaftServer::handleAppendResponse(bool success, uint64_t returnedTerm, int f
         bool isCurrentTerm;
         {
           std::lock_guard<std::mutex> lock(logs_mutex);
-          isCurrentTerm = (logs[i-1].first == currentTerm.load());
+          isCurrentTerm = (logs[i-1].term == currentTerm.load());
         }
         
         if (isCurrentTerm) {
@@ -334,7 +324,7 @@ void RaftServer::startElection() {
       {
           std::lock_guard<std::mutex> lock(logs_mutex);
           lastLogIndex = logs.size(); //this makes it 0 for EMPTY case, actual size otherwise
-          lastLogTerm = logs.empty() ? 0 : logs.back().first;
+          lastLogTerm = logs.empty() ? 0 : logs.back().term;
       }
       
       // Log_info("SENDING VOTE REQUEST: Server %d sending vote request to server %d, term=%d, lastLogIndex=%d, lastLogTerm=%d", 
@@ -384,8 +374,8 @@ bool RaftServer::Start(shared_ptr<Marshallable> &cmd,
 
   if (serverState.load() != RaftServer::LEADER) {
     // If NOT leader
-Log_info("START_REJECT: Server %d rejecting Start() - not leader (state=%d)", 
-  loc_id_, serverState.load());
+    Log_info("START_REJECT: Server %d rejecting Start() - not leader (state=%d)", 
+      loc_id_, serverState.load());
     return false;
   }
 
@@ -396,7 +386,7 @@ Log_info("START_REJECT: Server %d rejecting Start() - not leader (state=%d)",
        std::lock_guard<std::mutex> lock(logs_mutex);
        Log_info("NEW ENTRY: Server %d appending new entry to log, term=%d, logSize=%zu", 
          loc_id_, currentTerm.load(), logs.size());
-      logs.push_back({currentTerm.load(), cmd});
+      logs.push_back({cmd, currentTerm.load()});
       Log_info("START_APPEND: Server %d appended entry, NEW logSize=%zu, term=%d, index will be %zu", 
         loc_id_, logs.size(), currentTerm.load(), logs.size());
     }
@@ -406,7 +396,7 @@ Log_info("START_REJECT: Server %d rejecting Start() - not leader (state=%d)",
     {
       std::lock_guard<std::mutex> lock(logs_mutex);
       prevLogIndex = logs.size() - 1;
-      prevLogTerm = logs.size() > 1 ? logs[logs.size() - 2].first : 0;
+      prevLogTerm = logs.size() > 1 ? logs[logs.size() - 2].term : 0;
       sentUpToIndex = logs.size();
     }
 
@@ -417,28 +407,14 @@ Log_info("START_REJECT: Server %d rejecting Start() - not leader (state=%d)",
               // CORRECT - Add mutex protection
               // Log_info("SENDING NEW ENTRY: Server %d sending new entry to follower %d, prevLogIndex=%d, prevLogTerm=%d", 
                 // loc_id_, i, prevLogIndex, prevLogTerm);
-                // Create per-follower deep-copied command to avoid shared_ptr RefMut issues in RPC serialization
-              shared_ptr<Marshallable> cmd_copy;
-              {
-                // Try fast path via CmdData::Clone()
-                CmdData* cd = dynamic_cast<CmdData*>(cmd.get());
-                if (cd != nullptr) {
-                  CmdData* cd_clone = cd->Clone();
-                  cmd_copy.reset(static_cast<Marshallable*>(cd_clone));
-                } else {
-                  // Generic fallback: round-trip through MarshallDeputy to deep-copy
-                  Marshal m;
-                  MarshallDeputy md_orig(cmd);
-                  m << md_orig;
-                  MarshallDeputy md_new;
-                  m >> md_new;
-                  cmd_copy = md_new.sp_data_;
-                }
-              }
-              vector<shared_ptr<Marshallable>> newEntries = {cmd_copy};
-              vector<uint64_t> newEntryTerms = {static_cast<uint64_t>(currentTerm.load())};
+
+ 
+              vector<LogStruct> newEntries;
+              newEntries.push_back({cmd, static_cast<uint64_t>(currentTerm.load())});
+              // vector<uint64_t> newEntryTerms = {static_cast<uint64_t>(currentTerm.load())};
+
               commo() -> SendAppendEntries(0, i, currentTerm.load(), loc_id_,
-                prevLogIndex, prevLogTerm, newEntries, newEntryTerms, commitIndex.load(), 
+                prevLogIndex, prevLogTerm, newEntries, commitIndex.load(), 
                 [this, i, sentUpToIndex] (bool success, uint64_t returnedTerm, uint64_t followerId) {
                   // Log_info("NEW ENTRY RESPONSE: Server %d received new entry response from follower %d: success=%d", 
                   //   loc_id_, i, success);

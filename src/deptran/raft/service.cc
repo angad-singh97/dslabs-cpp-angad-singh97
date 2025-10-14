@@ -3,6 +3,7 @@
 #include "service.h"
 #include <algorithm>
 #include "server.h"
+#include "raft_rpc.h"
 
 namespace janus {
 
@@ -40,7 +41,7 @@ void RaftServiceImpl::HandleRequestVote(const uint64_t& candidateTerm,
   uint64_t myLastLogTerm, myLastLogIndex;
   {
       std::lock_guard<std::mutex> lock(svr_->logs_mutex);
-      myLastLogTerm = svr_ -> logs.empty() ? 0 : svr_ -> logs.back().first;
+      myLastLogTerm = svr_ -> logs.empty() ? 0 : svr_ -> logs.back().term;
       myLastLogIndex = svr_ -> logs.size();
   }
   bool areLogsStale = (lastLogTerm < myLastLogTerm) || (lastLogTerm == myLastLogTerm && lastLogIndex < myLastLogIndex);
@@ -69,8 +70,7 @@ void RaftServiceImpl::HandleAppendEntries(const uint64_t& term,
                                           const uint64_t& leaderId,
                                           const uint64_t& prevLogIndex,
                                           const uint64_t& prevLogTerm,
-                                          const std::vector<MarshallDeputy>& marshallDeputyVec,
-                                          const std::vector<uint64_t>& entry_terms,
+                                          const std::vector<LogStructRpc>& entries,
                                           const uint64_t& leaderCommit,
                                           uint64_t* currentTerm,
                                           bool_t* followerAppendOK,
@@ -121,7 +121,7 @@ void RaftServiceImpl::HandleAppendEntries(const uint64_t& term,
           defer->reply();
           return;
       }
-      if (svr_->logs[prevLogIndex - 1].first != prevLogTerm) {
+      if (svr_->logs[prevLogIndex - 1].term != prevLogTerm) {
           // Log_info("APPEND REJECTED: Server %d rejecting append (prevLogTerm mismatch: %d != %d at index %d)", 
           //   svr_->loc_id_, svr_->logs[prevLogIndex - 1].first, prevLogTerm, prevLogIndex);
           svr_->extendElectionTimeout();  // Extend timeout - we're out-of-date!
@@ -151,18 +151,19 @@ void RaftServiceImpl::HandleAppendEntries(const uint64_t& term,
     {
       std::lock_guard<std::mutex> lock(svr_->logs_mutex);
 
-      for (size_t i=0; i< marshallDeputyVec.size(); i++) {
+      for (size_t i=0; i< entries.size(); i++) {
         uint64_t entryLogIndex = prevLogIndex + 1 + i;
 
         if (entryLogIndex > svr_ -> logs.size() || 
-        svr_->logs[entryLogIndex - 1].first != entry_terms[i]) {
+        svr_->logs[entryLogIndex - 1].term != entries[i].term) {
 
           // Log_info("CONFLICT DETECTED: Server %d truncating logs at index %d, appending %zu entries from leader", 
           //   svr_->loc_id_, entryLogIndex - 1, marshallDeputyVec.size() - i);
           svr_->logs.resize(entryLogIndex - 1);
 
-          for (size_t j = i; j < marshallDeputyVec.size() ; j++) {
-            svr_->logs.push_back({entry_terms[j], marshallDeputyVec[j].sp_data_});
+          for (size_t j = i; j < entries.size() ; j++) {
+            std::shared_ptr<Marshallable> cmd = const_cast<MarshallDeputy&>(entries[j].command).sp_data_;
+            svr_->logs.push_back({cmd, entries[j].term});
           }
 
           break;

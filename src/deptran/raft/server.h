@@ -11,42 +11,12 @@ namespace janus {
 
 #define HEARTBEAT_INTERVAL 100000
 
-/*class LogStruct  : public Marshallable {
-  public:
-    int term;
-    // shared_ptr<Marshallable> command;
-
-    LogStruct(): Marshallable(MarshallDeputy::CONTAINER_CMD) {}
-
-    Marshal& ToMarshal(Marshal& m) const override {
-      m << term;
-      // MarshallDeputy md(command);
-      // m << md;
-      return m;
-    }
-
-    Marshal& FromMarshal (Marshal &m) override {
-      m >> term;
-      // MarshallDeputy md;
-      // m >> md;
-
-      // if (md.sp_data_) {
-      //   command = md.sp_data_; // here we get the actual data out
-      // } else {
-      //   command = nullptr;
-      // }
-      return m;
-    }
-
+struct LogStruct {
+  shared_ptr<Marshallable> cmd;
+  uint64_t term;
 };
 
-// Provide marshal operators for LogStruct so std::vector<LogStruct> can be serialized
-inline Marshal& operator<<(Marshal& m, const LogStruct& ls) {
-  return ls.ToMarshal(m);
-}
-inline Marshal& operator>>(Marshal& m, LogStruct& ls) {
-  return ls.FromMarshal(m);
-}*/
+
 
 class RaftServer : public TxLogServer {
  public:
@@ -56,7 +26,7 @@ class RaftServer : public TxLogServer {
   std::atomic<int>  votedFor{-1};
   static const int SERVER_COUNT = 5;
   std::mutex logs_mutex;
-  std::vector<std::pair<uint64_t, shared_ptr<Marshallable>>> logs;
+  std::vector<LogStruct> logs;
 
   
   //volatile state variables

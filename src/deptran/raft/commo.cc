@@ -63,8 +63,7 @@ void RaftCommo::SendAppendEntries(parid_t par_id,
                                   uint64_t leaderId,
                                   uint64_t prevLogIndex,
                                   uint64_t prevLogTerm,
-                                  std::vector<shared_ptr<Marshallable>> command,
-                                  std::vector<uint64_t> entry_terms,
+                                  std::vector<LogStruct> command,
                                   uint64_t leaderCommit,
                                   std::function<void(bool_t, uint64_t, uint64_t)> handleAppendResponse) {
   /*
@@ -93,10 +92,13 @@ void RaftCommo::SendAppendEntries(parid_t par_id,
       /* wrap Marshallable in a MarshallDeputy to send over RPC */
       // Log_info("flag 4 - server %d - target %d (SENDING APPEND ENTRIES)", raftServer -> loc_id_, (site_id ));
 
-      std::vector<MarshallDeputy> marshallDeputyVec;
-      for (auto& cmd : command) marshallDeputyVec.emplace_back(cmd);
+      std::vector<LogStructRpc> commandsVec;
+      for (auto& cmd : command) {
+        MarshallDeputy md (cmd.cmd);
+        commandsVec.push_back({md, cmd.term});
+      }
 
-      Call_Async(proxy, AppendEntries, term, leaderId, prevLogIndex, prevLogTerm, marshallDeputyVec, entry_terms, leaderCommit, fuattr);
+      Call_Async(proxy, AppendEntries, term, leaderId, prevLogIndex, prevLogTerm, commandsVec, leaderCommit, fuattr);
     }
   }
   return;

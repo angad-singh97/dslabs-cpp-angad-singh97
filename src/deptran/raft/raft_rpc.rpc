@@ -1,6 +1,12 @@
 namespace janus;
 
+struct LogStructRpc{
+  MarshallDeputy command;
+  i64 term;
+}
+
 abstract service Raft {
+
   defer RequestVote(uint64_t candidateTerm,
                     uint64_t candidateId, 
                     uint64_t lastLogIndex, 
@@ -12,8 +18,7 @@ abstract service Raft {
                       uint64_t leaderId,
                       uint64_t prevLogIndex,
                       uint64_t prevLogTerm,
-                      std::vector<MarshallDeputy> command,
-                      std::vector<uint64_t> entry_terms,
+                      vector<LogStructRpc> command,
                       uint64_t leaderCommit|
                       uint64_t currentTerm,
                       bool_t followerAppendOK);
