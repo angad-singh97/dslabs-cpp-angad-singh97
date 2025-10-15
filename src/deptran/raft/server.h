@@ -9,7 +9,7 @@
 
 namespace janus {
 
-#define HEARTBEAT_INTERVAL 250000
+#define HEARTBEAT_INTERVAL 210000
 
 struct LogStruct {
   shared_ptr<Marshallable> cmd;

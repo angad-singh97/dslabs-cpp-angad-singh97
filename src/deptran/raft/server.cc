@@ -53,7 +53,7 @@ void RaftServer::Setup() {
         resetElectionTimeout();
       }
 
-      auto t = Reactor::CreateSpEvent<TimeoutEvent>(10000);
+      auto t = Reactor::CreateSpEvent<TimeoutEvent>(15000);
       t->Wait();
     }
 
@@ -99,6 +99,8 @@ void RaftServer::Setup() {
 
           // Log_info("SENDING HEARTBEAT: Server %d sending heartbeat to server %d, term=%d, prevIdx=%d, prevTerm=%d, entries=%zu, sentUpToIndex=%d", 
           //   loc_id_, i, currentTerm.load(), prevIdx, prevTerm, entries_cloned.size(), sentUpToIndex);
+          // Log_info("RPC SENT - HEARTBEAT: Server %d -> Server %d, term=%d, entries=%zu", 
+          //   loc_id_, i, currentTerm.load(), entries.size());
           commo() -> SendAppendEntries(0, i, currentTerm.load(), loc_id_, prevIdx, prevTerm, entries, commitIndex.load(), 
           [this, i, sentUpToIndex] (bool success, uint64_t returnedTerm, uint64_t followerId) {
             // Log_info("HEARTBEAT RESPONSE: Server %d received heartbeat response from server %d: success=%d, term=%d", 
@@ -166,7 +168,7 @@ void RaftServer::handleVoteResponse (bool voteGranted, uint64_t returnedTerm) {
     // Log_info("Received voteGranted=true. votesReceived=%d, currentTerm=%d, serverState=%d", votesReceived.load(), currentTerm.load(), serverState.load());
     int majority = (SERVER_COUNT/2) + 1;
     if (votesReceived.load() >= majority) {
-      Log_info("LEADER TRANSITION: Server %d is now LEADER for term %lu", loc_id_, currentTerm.load());
+      // Log_info("LEADER TRANSITION: Server %d is now LEADER for term %lu", loc_id_, currentTerm.load());
       serverState.store(RaftServer::LEADER);
       votesReceived.store(0); // Reset vote counter after becoming leader
 
@@ -336,6 +338,8 @@ void RaftServer::startElection() {
       
       // Log_info("SENDING VOTE REQUEST: Server %d sending vote request to server %d, term=%d, lastLogIndex=%d, lastLogTerm=%d", 
         // loc_id_, i, currentTerm.load(), lastLogIndex, lastLogTerm);
+      // Log_info("RPC SENT - ELECTION: Server %d -> Server %d, term=%d, lastLogIndex=%d", 
+      //   loc_id_, i, currentTerm.load(), lastLogIndex);
       commo()->SendRequestVote(0, i, currentTerm.load(), loc_id_, lastLogIndex, lastLogTerm, 
       [this](bool voteGranted, uint64_t returnedTerm){
         // Log_info("VOTE RESPONSE: Server %d received vote response: granted=%d, term=%d", loc_id_, voteGranted, returnedTerm);
@@ -350,7 +354,7 @@ void RaftServer::startElection() {
 
 void RaftServer::resetElectionTimeout(){
   // Use a much wider range and server ID bias for better separation
-  int randomDuration = 300 + (rand() % 201);          // 200 to 400 ms randomly here
+  int randomDuration = 400 + (rand() % 101);          // 200 to 400 ms randomly here
   electionTimeout.store(std::chrono::milliseconds(randomDuration));
 }
 
