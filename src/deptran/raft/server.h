@@ -9,7 +9,7 @@
 
 namespace janus {
 
-#define HEARTBEAT_INTERVAL 100000
+#define HEARTBEAT_INTERVAL 250000
 
 struct LogStruct {
   shared_ptr<Marshallable> cmd;
@@ -51,6 +51,12 @@ class RaftServer : public TxLogServer {
 
   //tracking the election stuff here
   std::atomic<int> votesReceived {0};
+
+
+  std::mutex vote_response_mutex;
+  std::mutex append_response_mutex;
+  std::mutex state_transition_mutex;
+  std::mutex commit_processing_mutex;
 
 
   /* Your functions here */

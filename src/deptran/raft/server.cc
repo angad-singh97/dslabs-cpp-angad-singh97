@@ -53,7 +53,8 @@ void RaftServer::Setup() {
         resetElectionTimeout();
       }
 
-      Coroutine::Sleep(10000);
+      auto t = Reactor::CreateSpEvent<TimeoutEvent>(10000);
+      t->Wait();
     }
 
   });
@@ -106,7 +107,9 @@ void RaftServer::Setup() {
           });
         } 
       }
-      Coroutine::Sleep(HEARTBEAT_INTERVAL);
+   ;
+      auto t = Reactor::CreateSpEvent<TimeoutEvent>(HEARTBEAT_INTERVAL);
+      t->Wait();
     }
 
   });
@@ -128,14 +131,15 @@ void RaftServer::Setup() {
         }
         // Log_info("Applied entry %d: term=%d", lastApplied.load(), term);
       }
-      Coroutine::Sleep(50); 
+    
+      auto t = Reactor::CreateSpEvent<TimeoutEvent>(10000);
+      t->Wait();
     }
   });
 }
 
 void RaftServer::handleVoteResponse (bool voteGranted, uint64_t returnedTerm) {
-
-
+  std::lock_guard<std::mutex> lock(vote_response_mutex);  // Use the class member
 
   //Universal-term check, the paper says we do this for ANY request/response RPC received
   if (returnedTerm >  currentTerm.load()) {
@@ -186,7 +190,8 @@ void RaftServer::handleVoteResponse (bool voteGranted, uint64_t returnedTerm) {
 
 void RaftServer::handleAppendResponse(bool success, uint64_t returnedTerm, int followerId, int sentUpToIndex) {
   // Log_info("flag 10 - server %d: handleAppendResponse", loc_id_);
-  
+  std::lock_guard<std::mutex> lock(append_response_mutex);
+
   if (returnedTerm > currentTerm.load()) {
       convertToFollower(returnedTerm);
       return;
@@ -265,6 +270,8 @@ void RaftServer::handleAppendResponse(bool success, uint64_t returnedTerm, int f
 }
 
 void RaftServer::convertToFollower(uint64_t newTerm) {
+  std::lock_guard<std::mutex> lock(state_transition_mutex);
+
   ServerState priorState = serverState.load();
   // Log_info("STATE CHANGE: Server %d converting to FOLLOWER (was %d), newTerm=%d", 
     // loc_id_, priorState, newTerm);
@@ -343,7 +350,7 @@ void RaftServer::startElection() {
 
 void RaftServer::resetElectionTimeout(){
   // Use a much wider range and server ID bias for better separation
-  int randomDuration = 200 + (rand() % 201);          // 200 to 400 ms randomly here
+  int randomDuration = 300 + (rand() % 201);          // 200 to 400 ms randomly here
   electionTimeout.store(std::chrono::milliseconds(randomDuration));
 }
 
@@ -374,8 +381,8 @@ bool RaftServer::Start(shared_ptr<Marshallable> &cmd,
 
   if (serverState.load() != RaftServer::LEADER) {
     // If NOT leader
-    Log_info("START_REJECT: Server %d rejecting Start() - not leader (state=%d)", 
-      loc_id_, serverState.load());
+    // Log_info("START_REJECT: Server %d rejecting Start() - not leader (state=%d)", 
+    //   loc_id_, serverState.load());
     return false;
   }
 
@@ -384,11 +391,11 @@ bool RaftServer::Start(shared_ptr<Marshallable> &cmd,
      
      {
        std::lock_guard<std::mutex> lock(logs_mutex);
-       Log_info("NEW ENTRY: Server %d appending new entry to log, term=%d, logSize=%zu", 
-         loc_id_, currentTerm.load(), logs.size());
+      //  Log_info("NEW ENTRY: Server %d appending new entry to log, term=%d, logSize=%zu", 
+      //    loc_id_, currentTerm.load(), logs.size());
       logs.push_back({cmd, currentTerm.load()});
-      Log_info("START_APPEND: Server %d appended entry, NEW logSize=%zu, term=%d, index will be %zu", 
-        loc_id_, logs.size(), currentTerm.load(), logs.size());
+      // Log_info("START_APPEND: Server %d appended entry, NEW logSize=%zu, term=%d, index will be %zu", 
+      //   loc_id_, logs.size(), currentTerm.load(), logs.size());
     }
     
     uint64_t prevLogIndex, prevLogTerm;
@@ -413,16 +420,16 @@ bool RaftServer::Start(shared_ptr<Marshallable> &cmd,
               newEntries.push_back({cmd, static_cast<uint64_t>(currentTerm.load())});
               // vector<uint64_t> newEntryTerms = {static_cast<uint64_t>(currentTerm.load())};
 
-              commo() -> SendAppendEntries(0, i, currentTerm.load(), loc_id_,
-                prevLogIndex, prevLogTerm, newEntries, commitIndex.load(), 
-                [this, i, sentUpToIndex] (bool success, uint64_t returnedTerm, uint64_t followerId) {
-                  // Log_info("NEW ENTRY RESPONSE: Server %d received new entry response from follower %d: success=%d", 
-                  //   loc_id_, i, success);
-                  handleAppendResponse(success, returnedTerm, i, sentUpToIndex);
-                });
+              // commo() -> SendAppendEntries(0, i, currentTerm.load(), loc_id_,
+              //   prevLogIndex, prevLogTerm, newEntries, commitIndex.load(), 
+              //   [this, i, sentUpToIndex] (bool success, uint64_t returnedTerm, uint64_t followerId) {
+              //     // Log_info("NEW ENTRY RESPONSE: Server %d received new entry response from follower %d: success=%d", 
+              //     //   loc_id_, i, success);
+              //     handleAppendResponse(success, returnedTerm, i, sentUpToIndex);
+              //   });
                 // Inside the loop, for EACH follower
-        Log_info("START_REPLICATE: Server %d sending entry to follower %d, prevLogIndex=%d, prevLogTerm=%d, sentUpToIndex=%d", 
-          loc_id_, i, prevLogIndex, prevLogTerm, sentUpToIndex);
+        // Log_info("START_REPLICATE: Server %d sending entry to follower %d, prevLogIndex=%d, prevLogTerm=%d, sentUpToIndex=%d", 
+        //   loc_id_, i, prevLogIndex, prevLogTerm, sentUpToIndex);
           
         }
       }
@@ -433,8 +440,8 @@ bool RaftServer::Start(shared_ptr<Marshallable> &cmd,
     *index = logs.size();
   }
   *term = currentTerm.load();
-  Log_info("START_RETURN: Server %d returning SUCCESS, index=%d, term=%d", 
-    loc_id_, *index, *term);
+  // Log_info("START_RETURN: Server %d returning SUCCESS, index=%d, term=%d", 
+  //   loc_id_, *index, *term);
   return true;
 }
 
